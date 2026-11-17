@@ -28,11 +28,13 @@ flowchart LR
     svc["PAZ Service<br/>cluster-internal HTTPS"]
     paz["PAZ ×2 StatefulSet<br/>embedded PDP<br/>policy from S3 package store"]
     end
+    jwks["JWKS server ×1<br/>(publishes the subject key's JWKs<br/>for kid perf-subject-key)"]
     pap["PAP ×1<br/>authoring + inspection (public via ingress)"]
     s3["S3 bucket<br/>(versioned package store)"]
 
     k6 -- "POST /sideband/request<br/>PDG-TOKEN + Bearer<br/>(fresh self-signed RS256 per iteration)" --> svc
     svc --> paz
+    paz -. "JWKS fetch on validation<br/>(cached by PAZ)" .-> jwks
     pap -. "build-package.sh via PAP API<br/>→ PAP publishes package + pointer to s3://" .-> s3
     s3 -. "PAZ polls (30s)<br/>no restart on policy change" .-> paz
 ```
