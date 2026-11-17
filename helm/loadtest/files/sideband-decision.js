@@ -145,11 +145,15 @@ async function buildSubjectToken(vu, iter, extraClaims = {}) {
       issuer: subjectIssuer,
       mcpAud,
       userCount,
-      // Run id + agent index make jti unique across the ten independent k6
-      // processes (2026-11-17 review, finding 6): identical (vu, iter, now)
-      // in two agents would otherwise produce byte-identical tokens.
+      // Full request identity in jti (2026-11-17 follow-up review, finding
+      // 6): run id + agent index separate the ten k6 processes; the FULL VU
+      // id (not the wrapped user index) + scenario separate concurrent VUs
+      // within one agent. userIndex stays modulo userCount — that selects
+      // the policy's VIP identity, not the request identity.
       runId: __ENV.RUN_ID || '',
       agentIndex,
+      vuId: exec.vu.idInTest,
+      scenario: exec.scenario.name,
     }),
     ...extraClaims,
   };
@@ -523,9 +527,12 @@ async function decide({ scenario, token, body, expectPermit }) {
   const expected = verdictKind === 'error'
     ? false
     : (expectPermit ? verdictKind === 'permit' : verdictKind === 'deny');
+  // The check carries the same phase tag as every metric here — one
+  // tagging rule for everything decide() emits (follow-up review,
+  // additional issue: checks were previously untagged).
   check(response, {
     'PAZ returned the expected verdict': () => expected,
-  });
+  }, { phase });
   successRate.add(expected, { phase });
   if (verdictKind === 'deny') denials.add(1, { phase });
   if (verdictKind === 'error') errors.add(1, { phase });

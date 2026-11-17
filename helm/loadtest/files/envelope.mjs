@@ -34,20 +34,45 @@ export function buildSidebandEnvelope({
 
 // classify(statusCode, parsedBody) -> "permit" | "deny" | "error".
 // PAZ signals permit as HTTP 200 with NO embedded `response` object; a 200
-// WITH a `response` object is a DENY (the trap: agentgateway's extAuthz
-// treats every 2xx as allow — this loader must not). Anything that is not a
-// well-formed sideband response is an ERROR — transport failures, non-200
-// statuses, and 200s whose body does not parse to an object — and must
-// never be scored as an authorization decision in either direction
-// (2026-11-17 review, finding 3: !isPermit() conflated all three).
+// WITH a well-formed `response` object is a DENY (the trap: agentgateway's
+// extAuthz treats every 2xx as allow — this loader must not). Everything
+// else is an ERROR: transport failures, non-200s, malformed bodies, and
+// embedded server faults (2026-11-17 follow-up review, finding 3 — an
+// embedded response_code 500 or an {"error": ...} body is a SUT fault, not
+// an authorization denial, and never scores as a decision in either
+// direction).
+//
+// A well-formed embedded denial carries an object `response` with a numeric
+// `response_code` (the sideband adapter's decision echo). A `response` that
+// is a string, an empty object, or null is ambiguous evidence — error.
 export function classify(statusCode, parsedBody) {
-  if (statusCode === 200) {
-    if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
-      return parsedBody.response ? "deny" : "permit";
-    }
-    return "error"; // malformed body on a 200: not a decision
+  if (statusCode !== 200) {
+    return "error"; // transport failure / integration error / non-200
   }
-  return "error"; // transport failure / integration error / non-200
+  if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+    return "error"; // unparseable / non-object body on a 200
+  }
+  if ("error" in parsedBody) {
+    return "error"; // embedded integration error (e.g. {"error": "..."})
+  }
+  if (!("response" in parsedBody) || parsedBody.response === null) {
+    // No `response` key at all: a permit. A present-but-null `response` is
+    // ambiguous (the field exists but carries nothing) — malformed evidence.
+    return "response" in parsedBody ? "error" : "permit";
+  }
+  const r = parsedBody.response;
+  if (typeof r !== "object" || Array.isArray(r) || !("response_code" in r)) {
+    return "error"; // response without a response_code: not a well-formed denial
+  }
+  const code = r.response_code;
+  if (typeof code !== "number" || !Number.isFinite(code)) {
+    return "error"; // non-numeric response_code
+  }
+  // Embedded HTTP-error codes (5xx) are server faults, not denials.
+  if (code >= 500) {
+    return "error";
+  }
+  return "deny";
 }
 
 // isPermit(statusCode, parsedBody) -> boolean. Kept for the unit tests and
@@ -64,7 +89,7 @@ export function isPermit(statusCode, parsedBody) {
 //   index (2026-11-17 review, finding 6): k6 processes run independent VU
 //   and iteration counters, so (vu, iter, second) alone collides across
 //   agents and yields byte-identical tokens.
-export function buildClaims({ userIndex, iteration, issuer, mcpAud, userCount = 100, runId = "", agentIndex = 0 }) {
+export function buildClaims({ userIndex, iteration, issuer, mcpAud, userCount = 100, runId = "", agentIndex = 0, vuId = 0, scenario = "" }) {
   const now = Math.floor(Date.now() / 1000);
   const user = String((userIndex % userCount) + 1).padStart(3, "0");
   return {
@@ -77,7 +102,12 @@ export function buildClaims({ userIndex, iteration, issuer, mcpAud, userCount = 
     act: { sub: "customer_support_agent" },
     iat: now,
     exp: now + 300,
-    jti: `${runId}-${agentIndex}-${userIndex}-${iteration}-${now}`,
+    // Request uniqueness is separate from user-population selection:
+    // userIndex wraps modulo userCount (the policy's VIP fixture), while
+    // jti carries the FULL VU id (not the wrapped user index) plus run,
+    // agent, scenario, and iteration — VU 1 and VU 101 share a userIndex
+    // but must never share a token (2026-11-17 follow-up review, finding 6).
+    jti: `${runId}-${agentIndex}-${vuId}-${scenario}-${iteration}-${now}`,
   };
 }
 

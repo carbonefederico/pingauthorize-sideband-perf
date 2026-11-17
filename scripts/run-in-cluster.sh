@@ -134,23 +134,55 @@ kubectl -n "${NAMESPACE}" logs -f "job/${job_name}" || true
 kubectl -n "${NAMESPACE}" wait --for=condition=complete "job/${job_name}" --timeout=2m 2>/dev/null \
   || kubectl -n "${NAMESPACE}" wait --for=condition=failed "job/${job_name}" --timeout=5s 2>/dev/null || true
 
+# Evidence capture happens BEFORE any failure exit (2026-11-17 follow-up
+# review, finding 2): a failed Job is exactly when the artifacts matter,
+# and the old code exited before capturing agent logs and the monitor
+# scrape. The Job's success/failure verdict is taken after capture.
 succeeded="$(kubectl -n "${NAMESPACE}" get "job/${job_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo 0)"
+
+# Capture every agent's end-of-run summary + per-pod exit status, then the
+# best-effort cn=Monitor scrape (never fails the run — see scrape-monitor.sh).
+# Per-agent k6 exit codes go into env.json (agent_exit_codes) so the report
+# can gate on execution evidence per agent, not just the Job aggregate.
+echo "Capturing per-agent results to ${run_dir}..."
+exit_codes="{"
+for i in $(seq 0 $((agent_count - 1))); do
+  pod="$(kubectl -n "${NAMESPACE}" get pods -l "job-name=${job_name}" \
+    -o jsonpath="{range .items[?(@.metadata.annotations['batch\.kubernetes\.io/job-completion-index']=='${i}')]}{.metadata.name}{end}" 2>/dev/null)"
+  if [[ -n "${pod}" ]]; then
+    kubectl -n "${NAMESPACE}" logs "${pod}" -c k6 > "${run_dir}/agent-${i}.log" 2>/dev/null || true
+    # The pod's terminal phase tells terminated from still-running; the
+    # container's exitCode from the pod status is k6's own exit code.
+    code="$(kubectl -n "${NAMESPACE}" get pod "${pod}" -o jsonpath='{.status.containerStatuses[?(@.name=="k6")].state.terminated.exitCode}' 2>/dev/null)"
+    [[ -n "${code}" ]] || code="null"
+  else
+    code="null"
+  fi
+  [[ "${i}" -gt 0 ]] && exit_codes="${exit_codes},"
+  exit_codes="${exit_codes}\"agent-${i}\":${code}"
+done
+exit_codes="${exit_codes}}"
+python3 - "$run_dir" "$exit_codes" <<'PYEOF'
+import json, sys
+run_dir, raw = sys.argv[1], sys.argv[2]
+path = f"{run_dir}/env.json"
+try:
+    env = json.load(open(path))
+except (OSError, json.JSONDecodeError):
+    env = {}
+try:
+    env["agent_exit_codes"] = json.loads(raw)
+except json.JSONDecodeError:
+    env["agent_exit_codes"] = {}
+json.dump(env, open(path, "w"), indent=2)
+PYEOF
+kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide > "${run_dir}/job.txt" 2>&1 || true
+"${ROOT_DIR}/scripts/scrape-monitor.sh" "${run_dir}" || true
+
 if [[ "${succeeded}" != "${agent_count}" ]]; then
-  echo "k6 Job failed (usually because a request check or threshold failed)." >&2
+  echo "k6 Job failed (usually because a request check or threshold failed); evidence captured to ${run_dir}." >&2
   kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide >&2
   exit 1
 fi
-
-# Capture every agent's end-of-run summary, then the best-effort cn=Monitor
-# scrape (never fails the run — see scrape-monitor.sh).
-echo "Capturing per-agent results to ${run_dir}..."
-for i in $(seq 0 $((agent_count - 1))); do
-  pod="$(kubectl -n "${NAMESPACE}" get pods -o jsonpath="{range .items[?(@.metadata.annotations['batch\.kubernetes\.io/job-completion-index']=='${i}')]}{.metadata.name}{end}" 2>/dev/null)"
-  if [[ -n "${pod}" ]]; then
-    kubectl -n "${NAMESPACE}" logs "${pod}" -c k6 > "${run_dir}/agent-${i}.log" 2>/dev/null || true
-  fi
-done
-kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide > "${run_dir}/job.txt" 2>&1 || true
-"${ROOT_DIR}/scripts/scrape-monitor.sh" "${run_dir}" || true
 echo "Results saved: ${run_dir}/"
 echo "Generate the dashboard with: python3 scripts/generate-report.py ${run_dir}"

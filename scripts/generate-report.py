@@ -86,8 +86,13 @@ def parse_k6_metrics_json(path):
         print(f"warning: {path} unexpectedly large; skipping", file=sys.stderr)
         return None
     durations = []
+    elapsed = []  # sideband_request_elapsed (custom Trend, full call incl. connect)
     subtimings = {}  # metric -> [(ts, ms)] for connecting/tls_handshaking/waiting/sending/receiving
     warmup_points = 0
+    phaseless_points = 0
+    scenario_lat = {}  # scenario -> [(ts, ms)] measured-window per-request latency
+    scenario_success = {}  # scenario -> [ok_count, total] from the success Rate
+    scenario_errors = {}  # scenario -> error count from sideband_errors
     sub_metric_names = {"http_req_connecting", "http_req_tls_handshaking",
                         "http_req_waiting", "http_req_sending", "http_req_receiving"}
     with open(path, errors="replace") as f:
@@ -102,24 +107,46 @@ def parse_k6_metrics_json(path):
             if ev.get("type") != "Point":
                 continue
             metric = ev.get("metric", "")
-            if metric != "http_req_duration" and metric not in sub_metric_names:
-                continue
             data = ev.get("data", {})
-            # Warmup traffic (phase=warmup scenario) is excluded from the
-            # measured series — it exists to prime connections and JIT.
-            if data.get("tags", {}).get("phase") == "warmup":
-                warmup_points += 1
+            tags = data.get("tags", {})
+            # Measured-window extraction requires an EXPLICIT phase tag
+            # (2026-11-17 follow-up review, additional issue): a Point with
+            # no phase is ambiguous — counting it as measured would let
+            # untagged traffic into the measured window. Points without a
+            # phase are counted and reported as evidence of a format drift,
+            # not silently merged.
+            phase = tags.get("phase")
+            if metric in ("http_req_duration", "sideband_request_elapsed",
+                          "sideband_decision_success", "sideband_errors"):
+                if phase is None:
+                    phaseless_points += 1
+                    continue
+            if phase == "warmup":
+                if metric in ("http_req_duration", "sideband_request_elapsed"):
+                    warmup_points += 1
                 continue
+            scenario = tags.get("scenario", "")
+            value = data.get("value", 0)
             t = data.get("time", "")
             try:
                 ts = datetime.fromisoformat(t.replace("Z", "+00:00"))
             except ValueError:
                 continue
-            # k6's json output already reports trend durations in milliseconds.
             if metric == "http_req_duration":
-                durations.append((ts, float(data.get("value", 0))))
-            else:
-                subtimings.setdefault(metric, []).append((ts, float(data.get("value", 0))))
+                durations.append((ts, float(value)))
+                if scenario:
+                    scenario_lat.setdefault(scenario, []).append((ts, float(value)))
+            elif metric == "sideband_request_elapsed":
+                elapsed.append((ts, float(value)))
+            elif metric == "sideband_decision_success":
+                st = scenario_success.setdefault(scenario, [0, 0])
+                st[1] += 1
+                if value:
+                    st[0] += 1
+            elif metric == "sideband_errors":
+                scenario_errors[scenario] = scenario_errors.get(scenario, 0) + int(value)
+            elif metric in sub_metric_names:
+                subtimings.setdefault(metric, []).append((ts, float(value)))
     if not durations:
         return None
     durations.sort(key=lambda x: x[0])
@@ -141,13 +168,31 @@ def parse_k6_metrics_json(path):
     # Throughput: raw requests per second (count per bucket).
     req_rate = [(sec, len(buckets[sec])) for sec in sorted(buckets)]
     # Sub-timings (connecting / tls_handshaking / waiting / sending /
-    # receiving): per-second means, pooled across this agent's requests.
-    sub_series = {}
+    # receiving): RAW per-second values kept for exact weighted pooling —
+    # the old per-agent pre-meaned series made pooled_subtiming_means an
+    # unweighted mean of agent means (follow-up review, additional issue).
+    # Elapsed (full call incl. connect): same treatment as durations.
+    elapsed.sort(key=lambda x: x[0])
+    elapsed_buckets = {}
+    for ts, ms in elapsed:
+        elapsed_buckets.setdefault(int((ts - t0).total_seconds()), []).append(ms)
+    sub_raw = {}
     for name, pts in subtimings.items():
-        tb = {}
         for ts, ms in pts:
-            tb.setdefault(int((ts - t0).total_seconds()), []).append(ms)
-        sub_series[name] = [(sec, sum(v) / len(v)) for sec, v in sorted(tb.items())]
+            sub_raw.setdefault(name, {}).setdefault(
+                int((ts - t0).total_seconds()), []).append(ms)
+    # Per-scenario measured-window evidence, for the report's per-scenario
+    # gate evaluation (follow-up review, finding 5).
+    scen = {}
+    for name, pts in scenario_lat.items():
+        pts.sort()
+        vals = sorted(ms for _, ms in pts)
+        p95 = vals[min(len(vals) - 1, int(math.ceil(0.95 * len(vals))) - 1)] if vals else None
+        scen[name] = {"latency_points": pts, "p95_ms": p95, "requests": len(vals)}
+    for name, (ok, tot) in scenario_success.items():
+        scen.setdefault(name, {})["success_ok"], scen[name]["success_total"] = ok, tot
+    for name, errs in scenario_errors.items():
+        scen.setdefault(name, {})["errors"] = errs
     return {
         "dur_avg_s": dur_avg,
         "dur_p90_s": dur_p90,
@@ -155,8 +200,13 @@ def parse_k6_metrics_json(path):
         "req_rate": req_rate,
         # Raw per-second values, for exact pooling across agents on page 1.
         "buckets_ms": buckets,
-        "subtimings": sub_series,
+        "elapsed_buckets_ms": elapsed_buckets,
+        "subtimings_raw": sub_raw,
+        "subtimings": sub_raw,
+        "scenarios": scen,
+        "phaseless_points": phaseless_points,
         "total_requests": len(durations),
+        "total_elapsed": len(elapsed),
         "warmup_points": warmup_points,
         "t0": t0,
     }
@@ -213,13 +263,19 @@ def pooled_latency_stats(series):
 
 def pooled_subtiming_means(series):
     """Pooled per-second mean of each k6 sub-timing (connecting, tls_handshaking,
-    waiting, sending, receiving) across all agents: {metric: [(sec, ms)]}."""
+    waiting, sending, receiving) across all agents: {metric: [(sec, ms)]}.
+    Pools RAW per-request values (each agent's series carries raw points per
+    second since the follow-up review fix), so the per-second figure is a
+    request-weighted mean — not an unweighted mean of agent means."""
     pooled = {}
     for s in series.values():
-        for name, pts in s.get("subtimings", {}).items():
+        for name, per_sec in s.get("subtimings", {}).items():
             d = pooled.setdefault(name, {})
-            for sec, ms in pts:
-                d.setdefault(sec, []).append(ms)
+            # subtimings now carries RAW values bucketed per second:
+            # {sec: [ms, ...]} — pool every request's value, so the result
+            # is a request-weighted mean rather than a mean of agent means.
+            for sec, vals in per_sec.items():
+                d.setdefault(sec, []).extend(vals)
     return {name: [(sec, sum(v) / len(v)) for sec, v in sorted(d.items())]
             for name, d in pooled.items()}
 
@@ -528,7 +584,14 @@ def main():
                     # seconds of each agent's stream can be missing.
                     stream_truncated = True
 
-    usage_files = sorted(RESULTS.glob("pod-usage-*.csv"))
+    # Monitoring CSVs are per-RUN artifacts: monitor.sh writes
+    # results/<run_id>/pod-usage-<run_id>.csv. Prefer the run's own file;
+    # the global results/ glob is a legacy fallback and, when used, is
+    # flagged in the summary (the review caught reports pulling whichever
+    # CSV was newest regardless of run association).
+    usage_files = sorted((run_dir).glob("pod-usage-*.csv")) or sorted(RESULTS.glob("pod-usage-*.csv"))
+    usage_source = str(usage_files[-1]) if usage_files else None
+    usage_from_run_dir = bool(sorted(run_dir.glob("pod-usage-*.csv")))
     usage = parse_usage_csv(usage_files[-1]) if usage_files else {}
     paz_series = {p: s for p, s in usage.items() if "pingauthorize" in p and "pap" not in p and s[0][3] == "pod"}
     node_series = {p: s for p, s in usage.items() if s[0][3] == "node"}
@@ -697,7 +760,11 @@ def main():
     # the numerator — that fallback was the source of the published 1.05x
     # inflation (ramp ~15s of full-rate-equivalent traffic / 300s window).
     measured_reqs = sum(s["total_requests"] for s in series.values()) if series else None
-    window_s = cfg_duration_s or duration_s
+    # The window is the CONFIGURED measured duration. An observed stream span
+    # is not an acceptable substitute (follow-up review, finding 1): a run
+    # that died at 40s would otherwise be evaluated against a 40s target and
+    # its shortfall hidden. cfg_duration_s being None invalidates the run.
+    window_s = cfg_duration_s
     achieved_pct = None
     if cfg_rate and measured_reqs and window_s:
         # env.json's RATE is the TOTAL target across all agents (the profile
@@ -724,30 +791,122 @@ def main():
     # be evaluated is insufficient evidence, not a pass (2026-11-17 review,
     # finding 1). Insufficient evidence -> INVALID, never PASS.
     gate_failures = []
+    evidence_gaps = []
     if not summaries:
-        gate_failures.append("no agent logs parsed")
+        evidence_gaps.append("no agent logs parsed")
     if not series:
-        gate_failures.append("no per-request metric streams")
+        evidence_gaps.append("no per-request metric streams")
     elif measured_reqs is None or measured_reqs <= 0:
-        gate_failures.append("zero measured requests")
+        evidence_gaps.append("zero measured requests")
     if achieved_pct is None:
-        gate_failures.append("achieved-vs-target not computable (missing env.json or streams)")
+        evidence_gaps.append("achieved-vs-target not computable (missing env.json, DURATION, or streams)")
+
+    # Agent inventory: every expected agent (env.json AGENTS) must have BOTH
+    # a parsed log and a metric stream (follow-up review, finding 2). Some
+    # agents present is not the run configured.
+    if cfg_agents:
+        expected_ids = {f"agent-{i}" for i in range(cfg_agents)}
+        log_ids = {s["agent"] for s in summaries}
+        stream_ids = set(series)
+        for missing in sorted(expected_ids - log_ids):
+            evidence_gaps.append(f"agent log missing: {missing}")
+        for missing in sorted(expected_ids - stream_ids):
+            evidence_gaps.append(f"agent stream missing: {missing}")
+        for extra in sorted((log_ids | stream_ids) - expected_ids):
+            evidence_gaps.append(f"unexpected agent present: {extra}")
+
+    # k6 execution evidence: the runner writes per-agent exit codes into
+    # env.json (agent_exit_codes, follow-up review finding 2); a parsed log
+    # that says k6 exited nonzero, or a missing exit code for a collected
+    # agent, is a failure. Historical runs (pre-finding-2 runner) carry no
+    # per-agent codes, but their COLLECTION is itself evidence: run-in-
+    # cluster.sh exits nonzero before declaring "Results saved" unless the
+    # Job reached succeeded == AGENTS (every pod exits 0), so a run dir that
+    # exists with all agent streams counts as job-level success. The
+    # report records which evidence level it used.
+    agent_exit_codes = env_meta.get("agent_exit_codes") or {}
+    exit_evidence = "per-agent" if agent_exit_codes else (
+        "job-level (historical: runner verified succeeded==AGENTS before saving)"
+        if summaries else "none")
+    if agent_exit_codes:
+        for s in summaries:
+            code = agent_exit_codes.get(s["agent"])
+            if code is None:
+                evidence_gaps.append(f"k6 exit status unknown: {s['agent']}")
+            elif int(code) != 0:
+                gate_failures.append(f"k6 exited {code}: {s['agent']}")
+
+    # Per-scenario measured gates from the streams (follow-up review,
+    # finding 5): pooled statistics hide a failing low-volume scenario, so
+    # the report evaluates each configured scenario's measured p95, success,
+    # and error count independently.
+    expected_scenarios = {"mix_read", "mix_session", "mix_hitl", "mix_deny"}
+    scen_seen = set()
+    for s in series.values():
+        scen_seen.update(s.get("scenarios", {}).keys())
+    if series and not scen_seen:
+        evidence_gaps.append("no per-scenario evidence in streams")
+    scen_gates = {}
+    for name in sorted(expected_scenarios | scen_seen):
+        agg = {"p95_ms": None, "success_pct": None, "errors": 0, "requests": 0}
+        p95s, ok, tot = [], 0, 0
+        errs = 0
+        reqs = 0
+        for s in series.values():
+            sc = s.get("scenarios", {}).get(name)
+            if not sc:
+                continue
+            reqs += sc.get("requests", 0)
+            if sc.get("p95_ms") is not None:
+                p95s.append((sc["requests"], sc["p95_ms"]))
+            if sc.get("success_total"):
+                ok += sc.get("success_ok", 0)
+                tot += sc.get("success_total", 0)
+            errs += sc.get("errors", 0)
+        agg["requests"] = reqs
+        agg["errors"] = errs
+        # request-weighted pooled p95 per scenario (max of agent p95s is the
+        # conservative choice for a gate; weighted pooling of raw values is
+        # the pooled figure reported separately)
+        if p95s:
+            agg["p95_ms"] = max(p for _, p in p95s)
+        if tot:
+            agg["success_pct"] = 100.0 * ok / tot
+        scen_gates[name] = agg
+        if reqs == 0:
+            gate_failures.append(f"scenario {name}: zero measured requests")
+            continue
+        if agg["p95_ms"] is not None and not (agg["p95_ms"] < p95_gate):
+            gate_failures.append(f"scenario {name}: p95 {agg['p95_ms']} vs {p95_gate}")
+        if agg["success_pct"] is not None and not (agg["success_pct"] >= success_gate):
+            gate_failures.append(f"scenario {name}: success {agg['success_pct']:.2f}% vs {success_gate}")
+        if errs != 0:
+            gate_failures.append(f"scenario {name}: {errs} classified errors")
+
+    # Aggregate gates (pooled statistics — labeled separately from the
+    # per-scenario acceptance gates above).
     if platform_p95 is None or not (platform_p95 < p95_gate):
-        gate_failures.append(f"p95 gate: {platform_p95} vs {p95_gate}")
+        gate_failures.append(f"pooled p95 gate: {platform_p95} vs {p95_gate}")
     if success_pct is None or not (success_pct >= success_gate):
-        gate_failures.append(f"success gate: {success_pct} vs {success_gate}")
+        gate_failures.append(f"pooled success gate: {success_pct} vs {success_gate}")
     if total_dropped != 0:
         gate_failures.append(f"dropped iterations: {total_dropped}")
+    # Achieved rate: computed AND enforced (follow-up review, finding 1) —
+    # the first review fix only required computability; a 2%-achieved run
+    # passed. Below 98% of the configured target is a FAIL.
+    if achieved_pct is None:
+        evidence_gaps.append("achieved-vs-target not computable (missing env.json or streams)")
+    elif achieved_pct < 98.0:
+        gate_failures.append(f"achieved rate: {achieved_pct:.2f}% vs required 98%")
     # k6's own exit status is ground truth for its thresholds; a run whose
     # captured exit code says a threshold failed is a FAIL even if local
     # parsing cannot see which.
     k6_exit = env_meta.get("k6_exit_code")
     if k6_exit is not None and int(k6_exit) != 0:
         gate_failures.append(f"k6 exited {k6_exit}")
+    gate_failures.extend(evidence_gaps)
     if gate_failures:
-        verdict = "INVALID" if any("not computable" in g or "no agent logs" in g
-                                   or "no per-request" in g or "zero measured" in g
-                                   for g in gate_failures) else "FAIL"
+        verdict = "INVALID" if evidence_gaps else "FAIL"
     else:
         verdict = "PASS"
 
@@ -968,6 +1127,21 @@ def main():
     # JSON makes the evidence behind any report claim version-controlled).
     lat_stats = pooled_latency_stats(series) if series else None
 
+    # Pooled elapsed percentiles over the measured window (sideband_request_
+    # elapsed points, bucketed per agent). Empty for runs whose generator
+    # predated the metric (the 2026-11-17 campaign) — reported as None.
+    elapsed_vals = sorted(
+        ms for s in series.values()
+        for vals in s.get("elapsed_buckets_ms", {}).values()
+        for ms in vals)
+    e_n = len(elapsed_vals)
+    if e_n:
+        e_avg = sum(elapsed_vals) / e_n
+        e_p90 = elapsed_vals[min(e_n - 1, int(math.ceil(0.90 * e_n)) - 1)]
+        e_p95 = elapsed_vals[min(e_n - 1, int(math.ceil(0.95 * e_n)) - 1)]
+    else:
+        e_avg = e_p90 = e_p95 = None
+
     # CPU columns for the README table: steady-state statistics per PAZ pod
     # and per loadtest agent, from the monitor CSV or the in-run sampler
     # (whichever exists). Samples are first restricted to the run's measured
@@ -995,12 +1169,15 @@ def main():
                   else (window[mid - 1] + window[mid]) / 2)
         return median, len(window)
 
-    # measured-interval bounds in absolute time (samples share the streams'
-    # frame; bounds from env.json's configured warmup+duration)
+    # measured-interval bounds in absolute time. t0 is the FIRST MEASURED
+    # datapoint (the stream parser excludes phase=warmup before setting it),
+    # so the window opens AT t0 — adding the configured warmup here measured
+    # a window 30s late and dropped ten valid samples (follow-up review,
+    # finding 4). The window closes at t0 + configured duration.
     cpu_t_start = cpu_t_end = None
-    if t0 is not None and cfg_warmup_s is not None:
-        cpu_t_start = t0 + timedelta(seconds=cfg_warmup_s)
-        cpu_t_end = cpu_t_start + timedelta(seconds=(cfg_duration_s or 0))
+    if t0 is not None and cfg_duration_s:
+        cpu_t_start = t0
+        cpu_t_end = t0 + timedelta(seconds=cfg_duration_s)
     paz_replicas = {}
     for pod, pts in sorted(paz_series.items()):
         med, n = steady_median_m(pts, cpu_t_start, cpu_t_end)
@@ -1023,6 +1200,12 @@ def main():
         "agent_median_m": round(sum(agent_meds) / len(agent_meds)) if agent_meds else None,
         "agents": len(agent_meds),
         "interval": ("measured" if cpu_t_start is not None else "full-sampler"),
+        # Provenance (follow-up review, finding 4): which monitoring source
+        # fed the statistics and the window they were taken over.
+        "source": usage_source,
+        "source_is_run_file": usage_from_run_dir,
+        "window_utc": ([cpu_t_start.isoformat(), cpu_t_end.isoformat()]
+                       if cpu_t_start is not None else None),
     }
 
     summary = {
@@ -1031,6 +1214,13 @@ def main():
         "timestamp_utc": timestamp,
         "verdict": verdict,
         "gate_failures": gate_failures,
+        # Per-scenario acceptance gates (follow-up review, finding 5) —
+        # evaluated independently of the pooled statistics above.
+        "scenario_gates": {
+            name: {**agg, "p95_ms": round(agg["p95_ms"], 2) if agg["p95_ms"] is not None else None,
+                   "success_pct": round(agg["success_pct"], 2) if agg["success_pct"] is not None else None}
+            for name, agg in scen_gates.items()
+        },
         "p95_pooled_measured_ms": round(platform_p95, 2) if platform_p95 is not None else None,
         "p95_gate_ms": p95_gate,
         "success_pct": round(success_pct, 2) if success_pct is not None else None,
@@ -1052,6 +1242,17 @@ def main():
             "max_ms": round(lat_stats["max_ms"], 2),
             "requests": lat_stats["requests"],
         } if lat_stats else None,
+        # Full-call elapsed (sideband_request_elapsed: sending + waiting +
+        # receiving + connection establishment) — parsed from the streams
+        # (follow-up review, finding 7). None for the campaign runs: the
+        # metric started streaming only after the review fixes, and
+        # reprocessing cannot recover a custom metric never captured.
+        "pooled_elapsed": {
+            "avg_ms": round(e_avg, 2),
+            "p90_ms": round(e_p90, 2),
+            "p95_ms": round(e_p95, 2),
+            "requests": e_n,
+        } if e_n else None,
         # Steady-state CPU medians (see cpu_stats above) — the README
         # table's CPU columns. None when no usage data was captured.
         "cpu": cpu_stats,

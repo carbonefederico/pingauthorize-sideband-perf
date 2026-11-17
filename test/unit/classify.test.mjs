@@ -65,3 +65,38 @@ test("jti without runId/agentIndex still collides within one second — the k6 p
   const b = buildClaims({ userIndex: 1, iteration: 1, issuer: "iss", mcpAud: "aud" });
   assert.equal(a.jti, b.jti); // documents the collision the production args prevent
 });
+
+// 2026-11-17 follow-up review, finding 3: embedded server errors and
+// malformed embedded responses are errors, not denials.
+test("200 with embedded response_code 500 is an error, not a denial", () => {
+  assert.equal(classify(200, { response: { response_code: 500 } }), "error");
+});
+
+test("200 with a string response is an error", () => {
+  assert.equal(classify(200, { response: "bad" }), "error");
+});
+
+test("200 with an empty-object response is an error (no response_code)", () => {
+  assert.equal(classify(200, { response: {} }), "error");
+});
+
+test("200 with a null response is an error, not a permit", () => {
+  assert.equal(classify(200, { response: null }), "error");
+});
+
+test("200 with an embedded error object is an error, not a permit", () => {
+  assert.equal(classify(200, { error: "internal failure" }), "error");
+});
+
+test("200 with response_code 403 is a deny", () => {
+  assert.equal(classify(200, { response: { response_code: 403 } }), "deny");
+});
+
+// 2026-11-17 follow-up review, finding 6: within one agent, VU 1 and VU 101
+// share the wrapped userIndex — the jti must still differ (full vuId).
+test("jti differs for VU 1 and VU 101 with identical iteration/second/agent", () => {
+  const a = buildClaims({ userIndex: (1 + 42) % 100, iteration: 42, issuer: "iss", mcpAud: "aud", runId: "run-1", agentIndex: 0, vuId: 1, scenario: "mix_read" });
+  const b = buildClaims({ userIndex: (101 + 42) % 100, iteration: 42, issuer: "iss", mcpAud: "aud", runId: "run-1", agentIndex: 0, vuId: 101, scenario: "mix_read" });
+  assert.equal(a.sub, b.sub); // same VIP identity, by design of the wrap
+  assert.notEqual(a.jti, b.jti); // but never the same token identity
+});

@@ -353,15 +353,21 @@ measures.
    Subject identity rotates through 100 synthetic VIP users, and PAZ keeps no
    per-subject state on this path, so 100 hot identities exercise the same
    code paths as a cold population.
-   **Token-uniqueness caveat (post-review):** the campaign's `jti` was built
-   from (user, per-VU iteration, second) without the agent identity, so
-   independent k6 agents could mint byte-identical tokens within the same
-   second. Identical claims produce identical decisions, so no verdict is
-   affected — but duplicate tokens partially amortize PAZ's token-validation
-   work through its validation cache, which flatters the absolute numbers
-   slightly and equally at every level. The generator now includes the run
-   id and agent index in `jti` (fixed after the 2026-11-17 review); the
-   campaign's figures should be read as carrying this caveat.
+   **Token-uniqueness limitation (historical):** the campaign's `jti` was
+   built from (user, per-VU iteration, second) without the agent identity
+   or full VU id, so independent k6 agents — and, within one agent, VUs
+   whose indices share the wrapped user index — could mint byte-identical
+   tokens within the same second. Identical claims produce identical
+   decisions, so no decision verdict is affected. Whether PAZ's validation
+   cache absorbed duplicate tokens during the campaign, at what frequency,
+   and with what effect on latency or CPU is **unknown** — the archive
+   contains no cache-hit telemetry, and no directional claim ("slightly",
+   "equally") is supported. The generator now includes run id, agent
+   index, full VU id, and scenario in `jti` (fixed after the 2026-11-17
+   reviews). The original campaign's figures stand as historical
+   measurements of the documented workload with this recorded limitation;
+   validating the corrected workload requires a fresh campaign with the
+   fixed instrumentation.
 3. **The envelope is the production envelope.** The load generator builds the
    sideband request exactly as the sibling project's paz-extauthz-adapter
    does (schema pinned by unit tests). The measured traffic is a weighted
@@ -411,10 +417,10 @@ had been up and serving full-rate traffic since November 13.
 
 | Stage | Target rate | Requests | avg | median | p90 | p95 | p99 | PAZ CPU/pod | Agent CPU |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 500/s | 500/s | 150,001 | 1.85 ms | 1.66 ms | 2.29 ms | 2.87 ms | 6.22 ms | 422 m | 161 m |
-| 1000/s | 1000/s | 300,022 | 2.12 ms | 1.72 ms | 2.92 ms | 4.24 ms | 8.93 ms | 858 m | 328 m |
-| 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 1,328 m | 495 m |
-| 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,863 m | 696 m |
+| 500/s | 500/s | 150,001 | 1.85 ms | 1.66 ms | 2.29 ms | 2.87 ms | 6.22 ms | 424 m | 161 m |
+| 1000/s | 1000/s | 300,022 | 2.12 ms | 1.72 ms | 2.92 ms | 4.24 ms | 8.93 ms | 860 m | 327 m |
+| 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 1,329 m | 494 m |
+| 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,890 m | 697 m |
 
 All twelve runs re-verified after the correction: verdict PASS on every
 run, achieved rate 100.0–100.02% (the few-hundredths over 100 are boundary
@@ -433,14 +439,19 @@ simultaneous aggregate-load window (agents start within seconds of each
 other; the report charts bucket on a common absolute-time origin). The
 headline latency is k6's `response.timings.duration` — sending + waiting +
 receiving, excluding connection establishment, which steady-state
-connection reuse amortizes to each VU's first iterations; the reports also
-carry `sideband_request_elapsed`, the full call wall time including
-connect. CPU figures are the **median** over each pod's chronological
+connection reuse amortizes to each VU's first iterations. The generator
+also emits `sideband_request_elapsed` (the full call wall time including
+connect), but the 2026-11-17 campaign predates that metric: those runs'
+reports carry no elapsed figures, and reprocessing cannot recover a
+custom metric that was never captured — elapsed reporting applies to
+campaigns run with the corrected generator. CPU figures are the
+**median** over each pod's chronological
 middle-60% of samples inside the measured window only (the 15 s in-run
 sampler; per-replica medians in each run's `summary.json`, the table
 quoting their mean). CPU medians from the original publication were a
-value-sorted trimmed mean over all samples including warmup — 25–36% lower
-than the corrected figures; the correction removed that dilution.
+value-sorted trimmed mean over all samples including warmup — 27–36% lower
+than the corrected figures; the corrections (the median definition, then
+the measured-window boundary fix) removed that dilution.
 
 The shape of the ladder: the median decision latency barely moves across
 the four levels (1.66 → 1.72 → 1.88 → 2.75 ms through 4× the load), while
@@ -450,7 +461,7 @@ with* rising utilization as the cause (a queueing interpretation), but the
 campaign measured no per-replica queue depths, thread pools, GC telemetry,
 or CPU throttling, so it remains a hypothesis; the CPU figures alone do
 not rule out internal saturation. At the campaign bound the measured
-1,863 m median sits at 47% of the pods' 4-CPU limit — but the pods share
+1,890 m median sits at 47% of the pods' 4-CPU limit — but the pods share
 3.4-allocatable-CPU nodes with co-tenants, so the limit is a ceiling, not
 a guaranteed capacity: headroom against the *node* is smaller than
 headroom against the limit.
