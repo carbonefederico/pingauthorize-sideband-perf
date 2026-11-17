@@ -190,18 +190,20 @@ The sideband endpoint dsconfig layer is reproduced from the sibling verbatim
 (shared secret created before the Sideband API extension references it;
 `PDG-TOKEN` header name; endpoint `AgentGateway Portfolio MCP` with
 `service:AgentGateway`, `base-path:/mcp`) with one change: the endpoint's
-access-token validator uses PAZ's **local trusted-certificate model** — the
-issuer's public signing key is imported once via
-`dsconfig create-trusted-certificate` and referenced with `signing-certificate`
-on the JWT validator — instead of a remote JWKS fetch (the sibling used the
-internet-hosted JWT-Lab). **No JWKS server exists in this stack** (a decision
-confirmed with the owner): PF's dedicated JWKS pod represented an
-issuer-publishes/verifier-fetches distribution model that campaign set out to
-measure; here the question is the decision path, and the local certificate
-removes every remote fetch, cache, and refresh behavior from it. The recorded
-trade-off: the campaign measures a single static signing key with out-of-band
-distribution; `kid`-based rotation pickup is out of scope (PAZ cannot pick up
-key rotation without an HTTP JWKS source).
+access-token validator uses PAZ's **JWKS model** — the validator fetches the
+issuer's public JWK over HTTP from an in-cluster JWKS endpoint published by
+the loadtest chart (`https://paz-perf-subject`), issuer-publishes/
+verifier-fetches as in the PF campaign, with the fetch and cache on the
+measured path. (The original design used PAZ's local trusted-certificate
+model — one `dsconfig create-trusted-certificate` import, no remote fetch —
+on the reasoning that the decision path, not key distribution, was the
+question. Before any load ran, this was revisited: the certificate model
+left key rotation permanently out of reach, while the JWKS source is the
+production-shaped distribution a gateway integration actually runs, at the
+cost of one cached fetch on the path. The JWKS model shipped and is what
+the campaign measured. The recorded trade-off: the campaign signs every
+token with the same static key, so `kid`-based rotation pickup is exercised
+by the validator's presence, not by the campaign's traffic.)
 
 ### Topology and sizing (mirrors the PF campaign)
 
@@ -209,10 +211,16 @@ key rotation without an HTTP JWKS source).
 |---|---|---|---|---|
 | PAZ (StatefulSet, ephemeral `/opt/out`) | 2 | cpu 2, memory 3Gi | cpu 4, memory 6Gi | Mirrors PF engines' shape: the user's "4 vCPU each" maps onto the limits; preferred anti-affinity across nodes |
 | PAP (StatefulSet) | 1 | cpu 1, memory 2Gi | cpu 2, memory 4Gi | Package authoring only; idle during runs |
-| k6 agents (indexed Job) | 10 at load levels | cpu 100m | cpu 4, memory 2Gi | Burstable; monitor CSV records actual usage |
+| k6 agents (indexed Job) | 10 at load levels | cpu 500m, memory 512Mi | cpu 4, memory 2Gi | Provisioned for the rate produced (100m starved five of ten agents at 2000/s); preferred anti-affinity spreads agents across nodes, and a required term keeps every agent off the PAZ nodes (co-tenancy with a PAZ pod caused the 2026-11-16 stage-1500 drops) |
 
-There is no JWKS server: token validation uses PAZ's local
-trusted-certificate model (see Policy deployment). Everything is
+Token validation is JWKS-based: PAZ fetches the subject signing key's JWK
+over HTTP from an in-cluster JWKS endpoint published by the loadtest chart
+(`https://paz-perf-subject`) — issuer-publishes/verifier-fetches, as in the
+PF campaign, with PAZ's JWKS fetch and cache on the measured path. This
+replaced the original trusted-certificate design: the certificate shipped
+in the server profile left key rotation permanently out of reach, while the
+JWKS source is the production-shaped distribution the campaign wanted to
+measure. Everything is
 cluster-internal: no Ingress, no cert-manager, no public DNS.
 PAP's console is reached with `kubectl port-forward`. PAZ's Sideband API is
 consumed in-cluster over its HTTPS listener with `insecureSkipTLSVerify`

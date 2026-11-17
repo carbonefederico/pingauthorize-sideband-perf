@@ -37,14 +37,15 @@ flowchart LR
     s3 -. "PAZ polls (30s)<br/>no restart on policy change" .-> paz
 ```
 
-What is deliberately absent: no JWKS server, no API gateway, no adapter, and
+What is deliberately absent: no API gateway, no adapter, and
 no ingress in front of the PDP (the measured path keeps its cluster-internal
 Service). PAP is the one exposed workload — the policy administrator's
 inspection surface, via the cluster's nginx-public ingress with a
-cert-issued TLS host. Token validation uses PAZ's local
-trusted-certificate model — the k6-signed tokens' public certificate ships
-in the PAZ server profile, so no remote fetch, cache, or key-rotation
-behavior exists on the measured path. Policy delivery is production-shaped:
+cert-issued TLS host. Token validation is JWKS-based: the loadtest chart
+publishes the subject key's JWKS from an in-cluster endpoint
+(`<release>-jwks`), PAZ fetches and caches it (issuer-publishes/
+verifier-fetches, as in the PF campaign), and that fetch-plus-cache sits on
+the measured path. Policy delivery is production-shaped:
 PAP authors the policy, `build-package.sh` publishes the immutable package
 through PAP's package-store API to a private, versioned S3 bucket (PAP
 writes both the package object and the pointer file, exactly as the
@@ -139,7 +140,7 @@ helm/paz/            One configuration chart for the whole Ping stack: values fo
                      lab sizing requests 2 CPU/3Gi, limits 4/6Gi).
 helm/loadtest/       The k6 agent chart: an indexed Job, N parallel agent pods,
                      each running files/sideband-decision.js with files/envelope.mjs.
-server-profiles/     The PAZ dsconfig layer (trusted-certificate validator,
+server-profiles/     The PAZ dsconfig layer (JWKS token validator,
                      embedded-PDP Policy Decision Service, sideband endpoint)
                      and the PAP profile (snapshot import hook). See
                      server-profiles/README.md — including the version-specific
