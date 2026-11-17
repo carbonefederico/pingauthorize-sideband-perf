@@ -61,6 +61,44 @@ packaged as-is, so the measured decisions exercise the real policy ladder
 (audience gate, agent-identity delegation, VIP check, scope check) rather
 than a permit-all stub.
 
+## The policy under test and the traffic mix
+
+The measured decisions come from the sibling project's
+`AgentGatewayPortfolioMCP` policy branch, imported into PAP verbatim
+(`server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP.SNAPSHOT`)
+and published to PAZ as an immutable package rooted at the branch's Global
+Decision Point. Under the `AgentGateway` service, the `Portfolio MCP` policy
+set holds six policies, each a rule ladder over the JWT's claims (audience,
+acting-agent identity, VIP-user claim, scope) and the MCP request body:
+
+1. **Allow Session Methods** — MCP session methods (initialize / tools/list
+   / ping): R1 audience gate, R2 delegated-agent identity, R3 VIP-user
+   claim, R4 token-active.
+2. **Allow Read Tools** — the read-permit path: the same R1–R3 ladder plus
+   R4 `portfolio:read` scope; the cheapest full ladder on the tree.
+3. **Deny Unpriceable Orders** — a single guard rule.
+4. **Allow Orders with HITL Approval** — R1–R3 plus R4 `portfolio:write`
+   scope and the approval-binding rule, which mirrors the order body
+   (customerId / symbol / side / quantity / amount / txn) one-to-one against
+   the token's `tctx` block; the most expensive ladder on the tree.
+5. **Deny Oversized Orders** — a single guard rule (amount above the
+   `Order Approval Threshold` constant).
+6. **Default Deny** — the fallback verdict.
+
+Load is distributed at three layers. Across the generator: the target rate
+splits evenly over the ten k6 agent pods (RATE/10 per agent, enforced by
+`distributeRate`, which fails the run loudly when the split drifts more
+than 5%). Within each agent: the per-agent rate splits into four
+ramped-arrival scenarios that map onto the policy paths above — 60% reads
+(policy 2), 15% session methods (policy 1), 15% HITL orders (policy 4),
+and 10% expected denials, which rotate through four negative fixtures
+(undeclared acting agent and missing `act.sub` → R2, oversized order →
+policy 5, wrong audience → R1) and so walk the ladder to a deny verdict.
+Denials take the split remainder so rounding cannot break the sum, and a
+per-scenario drift guard re-checks it. Across the server: the ten agents
+POST to the cluster-internal PAZ Service, which load-balances across the
+two StatefulSet pods.
+
 ## Scope of this campaign
 
 The campaign is a **baseline characterization** of the sideband decision path
