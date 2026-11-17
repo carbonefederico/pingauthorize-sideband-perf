@@ -50,6 +50,8 @@ spec:
                   fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
             - name: AGENT_COUNT
               value: {{ int .Values.agentCount | quote }}
+            - name: RUN_ID
+              value: {{ .Release.Name }}-{{ .Values.runId | trunc 20 | trimSuffix "-" }}
           volumeMounts:
             - name: script
               mountPath: /scripts

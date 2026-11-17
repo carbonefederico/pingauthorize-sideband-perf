@@ -1,17 +1,25 @@
 import http from 'k6/http';
 import encoding from 'k6/encoding';
 import { check } from 'k6';
+import exec from 'k6/execution';
 import { Rate, Trend, Counter } from 'k6/metrics';
 // NOTE: no `import crypto from 'k6/crypto'` — that legacy module shadows the
 // global WebCrypto `crypto` object that provides `crypto.subtle`.
 // envelope.mjs rides in the same ConfigMap and supplies the envelope, the
-// claim set, the decision rule, and the rate distribution guard.
+// claim set, the decision classifier, and the rate distribution guard.
 
-import { buildSidebandEnvelope, buildClaims, isPermit, distributeRate } from './envelope.mjs';
+import { buildSidebandEnvelope, buildClaims, classify, distributeRate } from './envelope.mjs';
 
+// Phase-scoped metrics: ramp traffic must not gate the measured thresholds
+// (2026-11-17 review, finding 4). The phase tag is applied per request below
+// AND carried on every custom metric, and the thresholds select
+// {phase:measured} explicitly. `elapsed` additionally covers connection
+// establishment (finding 7) — see decide().
 const successRate = new Rate('sideband_decision_success');
 const latency = new Trend('sideband_decision_latency', true);
+const elapsed = new Trend('sideband_request_elapsed', true);
 const denials = new Counter('sideband_denials');
+const errors = new Counter('sideband_errors');
 
 const required = [
   'PAZ_SIDEBAND_URL', 'SIDEBAND_SHARED_SECRET', 'MCP_AUD',
@@ -71,15 +79,25 @@ const sidebandUrl = __ENV.PAZ_SIDEBAND_URL;
 const sharedSecret = __ENV.SIDEBAND_SHARED_SECRET;
 const requestTimeout = __ENV.REQUEST_TIMEOUT || '30s';
 
-// Wall clock when this agent's run started, for the dynamic phase tag: ramp
-// traffic (first WARMUP seconds) is warmup, the plateau after it is the
-// measured window. Init context runs once per run, before any scenario.
-const REQUEST_START_MS = Date.now();
+// Phase boundary: ramp traffic (first WARMUP seconds of each SCENARIO) is
+// warmup, the plateau after it is the measured window. The boundary is
+// computed from exec.scenario.startTime — the actual scenario start of the
+// VU's current scenario — NOT from a Date.now() captured in init context:
+// k6 re-runs init per VU (dynamically allocated VUs included), so an
+// init-time clock skews per VU (2026-11-17 review, finding 4).
 const WARMUP_MS = (() => {
   const m = String(__ENV.WARMUP || '30s').match(/^([\d.]+)(ms|s|m)?$/);
   if (!m) return 30000;
   return parseFloat(m[1]) * (m[2] === 'm' ? 60000 : m[2] === 'ms' ? 1 : 1000);
 })();
+
+// Phase is assigned at HTTP-call start (the moment decide() issues the
+// request), consistently for the HTTP metric, the custom metrics, and the
+// check — one rule for all three.
+function currentPhase() {
+  const scenarioStartMs = exec.scenario.startTime;
+  return Date.now() - scenarioStartMs < WARMUP_MS ? 'warmup' : 'measured';
+}
 
 // The MCP audience doubles as the envelope URL's origin: the policies gate
 // on this resource identifier, so the envelope must present it. k6's init
@@ -127,6 +145,11 @@ async function buildSubjectToken(vu, iter, extraClaims = {}) {
       issuer: subjectIssuer,
       mcpAud,
       userCount,
+      // Run id + agent index make jti unique across the ten independent k6
+      // processes (2026-11-17 review, finding 6): identical (vu, iter, now)
+      // in two agents would otherwise produce byte-identical tokens.
+      runId: __ENV.RUN_ID || '',
+      agentIndex,
     }),
     ...extraClaims,
   };
@@ -270,19 +293,28 @@ export const options = {
     },
   },
   thresholds: {
-    // Latency and success gates apply to each MEASURED scenario (sub-metrics
-    // scoped by scenario name); warmup traffic exists to prime the platform
-    // and must not gate.
-    'sideband_decision_latency{scenario:mix_read}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_session}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_hitl}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_deny}': [`p(95)<${p95Ms}`],
-    'sideband_decision_success{scenario:mix_read}': [`rate>=${minimumSuccessRate}`],
-    'sideband_decision_success{scenario:mix_session}': [`rate>=${minimumSuccessRate}`],
-    'sideband_decision_success{scenario:mix_hitl}': [`rate>=${minimumSuccessRate}`],
+    // Latency and success gates apply to each MEASURED scenario's MEASURED
+    // phase only: sub-metrics scoped by scenario AND phase (the custom
+    // metrics carry the per-request phase tag since the 2026-11-17 review,
+    // finding 4 — without it ramp traffic gated the thresholds). Warmup
+    // traffic exists to prime the platform and must not gate.
+    'sideband_decision_latency{scenario:mix_read,phase:measured}': [`p(95)<${p95Ms}`],
+    'sideband_decision_latency{scenario:mix_session,phase:measured}': [`p(95)<${p95Ms}`],
+    'sideband_decision_latency{scenario:mix_hitl,phase:measured}': [`p(95)<${p95Ms}`],
+    'sideband_decision_latency{scenario:mix_deny,phase:measured}': [`p(95)<${p95Ms}`],
+    'sideband_decision_success{scenario:mix_read,phase:measured}': [`rate>=${minimumSuccessRate}`],
+    'sideband_decision_success{scenario:mix_session,phase:measured}': [`rate>=${minimumSuccessRate}`],
+    'sideband_decision_success{scenario:mix_hitl,phase:measured}': [`rate>=${minimumSuccessRate}`],
     // The deny scenario's "success" is landing the EXPECTED denial; a permit
-    // there is a policy failure, scored the same way.
-    'sideband_decision_success{scenario:mix_deny}': [`rate>=${minimumSuccessRate}`],
+    // there is a policy failure, scored the same way. Errors (malformed
+    // responses, transport failures) never count as successes in any
+    // scenario — classify() keeps them out of the decision statistics, and
+    // the error counter below fails the run outright.
+    'sideband_decision_success{scenario:mix_deny,phase:measured}': [`rate>=${minimumSuccessRate}`],
+    // Any integration error in the measured window fails the run: an error
+    // is neither a permit nor an expected denial (2026-11-17 review,
+    // finding 3).
+    'sideband_errors{phase:measured}': ['count==0'],
     'http_req_failed': ['rate<0.01'],
     // Dropped iterations invalidate a stress stage: when required concurrency
     // (rate x latency) exceeds maxVUs, k6 silently sheds load and latency
@@ -451,9 +483,11 @@ async function decide({ scenario, token, body, expectPermit }) {
 
   // Dynamic phase tag: the ramped scenarios run ramp (warmup) and plateau
   // (measured) inside ONE scenario, so the phase must be decided per
-  // request from the run clock — a static scenario tag labels the plateau
-  // warmup too and blinds the report's measured-window parser.
-  const phase = Date.now() - REQUEST_START_MS < WARMUP_MS ? 'warmup' : 'measured';
+  // request from the scenario clock — a static scenario tag labels the
+  // plateau warmup too and blinds the report's measured-window parser.
+  // One assignment rule for the HTTP metric, all custom metrics, and the
+  // check: phase is read at HTTP-call start.
+  const phase = currentPhase();
   const params = {
     headers: {
       'Content-Type': 'application/json',
@@ -463,21 +497,36 @@ async function decide({ scenario, token, body, expectPermit }) {
     timeout: requestTimeout,
   };
 
+  const wallStart = Date.now();
   const response = http.post(sidebandUrl, JSON.stringify(envelope), params);
-  latency.add(response.timings.duration);
+  // latency = k6's timings.duration (sending + waiting + receiving; the
+  // steady-state connection is reused, so TCP/TLS setup is amortized to the
+  // first iterations of each VU's connection). elapsed = the full call wall
+  // time INCLUDING connection establishment — reported separately so the
+  // connection-setup share stays visible (2026-11-17 review, finding 7).
+  latency.add(response.timings.duration, { phase });
+  elapsed.add(Date.now() - wallStart, { phase });
 
   let payload = null;
   try {
     payload = response.json();
   } catch (_) {
-    // isPermit treats an unparseable body as not-a-permit; nothing to log.
+    // classify() scores the unparseable body as an error below.
   }
 
-  const permitted = isPermit(response.status, payload);
-  const expected = expectPermit ? permitted : !permitted;
+  // Three-way classification (2026-11-17 review, finding 3): permits and
+  // denials are authorization decisions; malformed responses, transport
+  // failures, and non-200s are ERRORS. Errors never count toward decision
+  // success — an error in the deny scenario is not a successful expected
+  // denial, it is a generator/SUT fault.
+  const verdictKind = classify(response.status, payload);
+  const expected = verdictKind === 'error'
+    ? false
+    : (expectPermit ? verdictKind === 'permit' : verdictKind === 'deny');
   check(response, {
     'PAZ returned the expected verdict': () => expected,
   });
-  successRate.add(expected);
-  if (!permitted) denials.add(1);
+  successRate.add(expected, { phase });
+  if (verdictKind === 'deny') denials.add(1, { phase });
+  if (verdictKind === 'error') errors.add(1, { phase });
 }

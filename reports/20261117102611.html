@@ -52,7 +52,7 @@
               letter-spacing: -.01em; }
   .tile .l { font-size: 10px; color: var(--muted); text-transform: uppercase;
               letter-spacing: .06em; margin-top: 1px; }
-  .pass { color: var(--green); } .fail { color: var(--red); }
+  .pass { color: var(--green); } .fail { color: var(--red); } .invalid { color: var(--red); }
   table { border-collapse: separate; border-spacing: 0; width: 100%; margin: 10px 0;
            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
            overflow: hidden; box-shadow: var(--shadow); }
@@ -94,9 +94,9 @@
   <div class="tile"><div class="v pass">PASS</div><div class="l">thresholds</div></div>
   <div class="tile"><div class="v">100.00%</div><div class="l">min success</div></div>
   <div class="tile"><div class="v">2.8 ms</div><div class="l">platform p95</div></div>
-  <div class="tile"><div class="v">—</div><div class="l">achieved vs target rate</div></div>
+  <div class="tile"><div class="v">100.0%</div><div class="l">achieved vs target rate</div></div>
   <div class="tile"><div class="v ">0</div><div class="l">dropped iterations</div></div>
-  <div class="tile"><div class="v">525/s</div><div class="l">avg throughput</div></div>
+  <div class="tile"><div class="v">500/s</div><div class="l">avg throughput (measured window)</div></div>
   <div class="tile"><div class="v">157,461</div><div class="l">total requests</div></div>
 </div>
 <p class="muted">Note: per-request streams are snapshotted while the agents run; the last few seconds of each stream are missing (end-of-run summaries are complete).</p>
@@ -336,5 +336,5 @@
 </figure>
   <table><tr><th>metric</th><th class="num">value</th></tr><tr><td>avg</td><td class='num'>1.90 ms</td></tr><tr><td>median</td><td class='num'>1.71 ms</td></tr><tr><td>p90</td><td class='num'>2.27 ms</td></tr><tr><td>p95</td><td class='num'>2.60 ms</td></tr><tr><td>max</td><td class='num'>17.50 ms</td></tr><tr><td>requests</td><td class='num'>15747</td></tr><tr><td>success</td><td class='num'>100.00%</td></tr></table>
 </section>
-<footer>Generated 2026-11-17 10:34 UTC by scripts/generate-report.py — self-contained, no external resources.</footer>
+<footer>Generated 2026-11-17 16:18 UTC by scripts/generate-report.py — self-contained, no external resources.</footer>
 </body></html>

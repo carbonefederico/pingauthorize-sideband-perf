@@ -18,7 +18,7 @@ import json
 import math
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -570,10 +570,22 @@ def main():
     latency_avg = []
     latency_p90 = []
     if series:
-        pooled = {}  # sec -> list of raw latencies across all agents
+        # Aggregate buckets key on ABSOLUTE time: each agent's stream has its
+        # own t0 (its first datapoint), and combining per-agent relative
+        # seconds would mix different wall-clock moments into one bucket
+        # (2026-11-17 review, finding 8). t0 here is the EARLIEST first
+        # datapoint across agents; every agent's buckets are shifted by its
+        # own t0 offset against that origin.
+        agg_t0 = min(s["t0"] for s in series.values())
+        pooled = {}  # sec since common origin -> list of raw latencies
         for s in series.values():
+            own0 = (datetime.fromisoformat(str(s["t0"]).replace("Z", "+00:00"))
+                    if isinstance(s["t0"], str) else s["t0"])
+            origin = (datetime.fromisoformat(str(agg_t0).replace("Z", "+00:00"))
+                      if isinstance(agg_t0, str) else agg_t0)
+            shift = int((own0 - origin).total_seconds())
             for sec, vals in s["buckets_ms"].items():
-                pooled.setdefault(sec, []).extend(vals)
+                pooled.setdefault(sec + shift, []).extend(vals)
         secs = sorted(pooled)
         agg_rate = [(sec, len(pooled[sec])) for sec in secs]
         agg_avg = [(sec, sum(pooled[sec]) / len(pooled[sec])) for sec in secs]
@@ -637,16 +649,20 @@ def main():
     # ---- aggregate numbers ----
     total_reqs = sum(int(s.get("reqs", [0])[0]) for s in summaries) or \
         sum(s["total_requests"] for s in series.values())
-    success_vals = [s.get("success", [100, 0, 0])[0] for s in summaries]
-    success_pct = min(success_vals) if success_vals else 100.0
+    # Missing success evidence is NOT a perfect score: with no agent summaries
+    # (or no success metric in them) the gate cannot be evaluated and the run
+    # is INVALID (2026-11-17 review, finding 1). Same for platform_p95 below:
+    # with no streams and no logs the fallback must be None, not 0.
+    success_vals = [s.get("success", [None])[0] for s in summaries if s.get("success")]
+    success_pct = min(success_vals) if success_vals else None
 
     # Platform-wide p95: the true pooled percentile over every measured-phase
     # datapoint across all agents (exactly the same values a reviewer would
     # recompute from the raw NDJSON streams). Falls back to the worst agent's
     # end-of-run p95 only when no streams exist.
     platform_p95 = pooled_percentile(series) if series else (
-        max((s["latency"][5] for s in summaries if "latency" in s), default=0))
-    duration_s = max((s["dur_p90_s"][-1][0] for s in series.values()), default=300)
+        max((s["latency"][5] for s in summaries if "latency" in s), default=None))
+    duration_s = max((s["dur_p90_s"][-1][0] for s in series.values()), default=None)
     # Dropped iterations and achieved-vs-target rate: the generator must not
     # shed load silently (Little's-law VU cap). The end-of-run aggregate
     # includes warmup; the measured-window target is target_rate x agents x
@@ -660,63 +676,80 @@ def main():
             total += float(num) * (60 if unit == "m" else 3600 if unit == "h" else 1)
         return total if total else None
 
-    warmup_configured_s = next(
-        (parse_duration(s["warmup_cfg"][0]) for s in summaries if "warmup_cfg" in s), None)
-    target_rate = next((float(s["target_rate"][0]) for s in summaries if "target_rate" in s), None)
+    # Run configuration comes from the run's own captured metadata (env.json,
+    # written by run-in-cluster.sh at launch) — never from parsing the log's
+    # scenario description lines. The log-regex source of target_rate survived
+    # the constant-arrival -> ramping-arrival rewrite (the summary line's
+    # scenario name changed to mix_*), which silently disabled the
+    # achieved-vs-target gate for every ramped run (2026-11-17 review, finding
+    # 2): target_rate stayed None, achieved_pct stayed None, and the verdict
+    # treated None as a pass. env.json carries RATE/AGENTS/WARMUP/DURATION
+    # regardless of script shape, so the gate cannot be silently disabled by
+    # future log-format drift.
+    cfg_rate = float(env_meta.get("RATE")) if env_meta.get("RATE") else None
+    cfg_agents = int(env_meta.get("AGENTS")) if env_meta.get("AGENTS") else None
+    cfg_warmup_s = parse_duration(env_meta.get("WARMUP", "")) if env_meta.get("WARMUP") else None
+    cfg_duration_s = parse_duration(env_meta.get("DURATION", "")) if env_meta.get("DURATION") else None
+
+    # Measured-window requests: only datapoints inside the measured phase,
+    # from the raw streams (the streams carry the per-request phase tag).
+    # The end-of-run log aggregate is ramp-inclusive and may not be used as
+    # the numerator — that fallback was the source of the published 1.05x
+    # inflation (ramp ~15s of full-rate-equivalent traffic / 300s window).
+    measured_reqs = sum(s["total_requests"] for s in series.values()) if series else None
+    window_s = cfg_duration_s or duration_s
     achieved_pct = None
-    measured_reqs = None
-    window_s = None
-    if target_rate and series:
-        # The metric answers: "did the generator deliver the load it was
-        # configured to deliver?" Both sides use what the run ACTUALLY did:
-        #
-        #   numerator   = completed measured-scenario iterations (from the
-        #                 end-of-run logs, minus the configured warmup traffic)
-        #   denominator = what the scheduled window promised: rate x agents x
-        #                 configured duration
-        #
-        # k6's arrival scheduler may complete 0-2 boundary iterations per
-        # agent beyond rate x duration (a sub-millisecond race between the
-        # last scheduled arrival and the window close), so the numerator can
-        # exceed the denominator by a hair. The metric is therefore CAPPED at
-        # 100: overshoot means the generator delivered at least the promised
-        # load, never more than promised. (The alternative - removing the
-        # boundary iterations from the measurement - would discard real
-        # traffic; capping keeps every completed exchange in the latency
-        # pools and simply refuses to call over-delivery a percentage gain.)
-        stream_reqs = sum(s["total_requests"] for s in series.values())
-        if warmup_configured_s:
-            log_reqs_excl_warmup = total_reqs - int(target_rate * len(summaries) * warmup_configured_s)
-        else:
-            log_reqs_excl_warmup = total_reqs
-        measured_reqs = max(stream_reqs, log_reqs_excl_warmup)
-        configured_duration_s = next(
-            (parse_duration(s["duration_cfg"][0]) for s in summaries if "duration_cfg" in s),
-            None)
-        window_s = configured_duration_s if configured_duration_s else duration_s
-        target_measured = target_rate * len(summaries) * window_s
-        if target_measured > 0:
-            achieved_pct = min(100.0, 100.0 * measured_reqs / target_measured)
+    if cfg_rate and measured_reqs and window_s:
+        # env.json's RATE is the TOTAL target across all agents (the profile
+        # semantic: "RATE=2000 = 2000 decisions/s aggregate"); the per-agent
+        # split is RATE/AGENTS. The denominator is therefore RATE x window.
+        target_measured = cfg_rate * window_s
+        achieved_pct = 100.0 * measured_reqs / target_measured
+        # No cap: overdelivery is a finding, not a rounding artifact to hide.
+        # (Boundary iterations can push this a hair above 100; anything
+        # materially above 100 means the run's window or config is wrong.)
+
     # The "avg throughput" tile: measured-window requests over the measured
     # window — the SAME numerator and window as the achieved-vs-target
-    # metric. The end-of-run k6 aggregate includes the warmup scenario, so
-    # dividing it by the measured window inflates the rate (165,010 incl.
-    # 15,000 warmup iterations / 299 s -> a phantom 552/s at a 500/s target).
-    # Falls back to the stream aggregate only when the window is unknown.
-    if measured_reqs is not None and window_s:
-        throughput_total = measured_reqs / window_s
-    else:
-        throughput_total = total_reqs / duration_s if duration_s else 0
+    # metric. When the streams (and with them the measured numerator) are
+    # unavailable, the tile is NOT APPROXIMATED from ramp-inclusive log
+    # totals; it reports None and the report says so.
+    throughput_total = (measured_reqs / window_s) if (measured_reqs is not None and window_s) else None
     # Thresholds ride with the run's captured metadata (env.json), falling
     # back to the last-resort defaults; never a hardcoded constant.
     p95_gate = float(env_meta.get("P95_MS", 500.0))
     success_gate = float(env_meta.get("SUCCESS_RATE", 0.99)) * 100.0
-    verdict = "PASS" if (
-        platform_p95 < p95_gate
-        and success_pct >= success_gate
-        and (achieved_pct is None or achieved_pct >= 98)
-        and total_dropped == 0
-    ) else "FAIL"
+
+    # Verdict: every mandatory gate must be COMPUTABLE — a gate that cannot
+    # be evaluated is insufficient evidence, not a pass (2026-11-17 review,
+    # finding 1). Insufficient evidence -> INVALID, never PASS.
+    gate_failures = []
+    if not summaries:
+        gate_failures.append("no agent logs parsed")
+    if not series:
+        gate_failures.append("no per-request metric streams")
+    elif measured_reqs is None or measured_reqs <= 0:
+        gate_failures.append("zero measured requests")
+    if achieved_pct is None:
+        gate_failures.append("achieved-vs-target not computable (missing env.json or streams)")
+    if platform_p95 is None or not (platform_p95 < p95_gate):
+        gate_failures.append(f"p95 gate: {platform_p95} vs {p95_gate}")
+    if success_pct is None or not (success_pct >= success_gate):
+        gate_failures.append(f"success gate: {success_pct} vs {success_gate}")
+    if total_dropped != 0:
+        gate_failures.append(f"dropped iterations: {total_dropped}")
+    # k6's own exit status is ground truth for its thresholds; a run whose
+    # captured exit code says a threshold failed is a FAIL even if local
+    # parsing cannot see which.
+    k6_exit = env_meta.get("k6_exit_code")
+    if k6_exit is not None and int(k6_exit) != 0:
+        gate_failures.append(f"k6 exited {k6_exit}")
+    if gate_failures:
+        verdict = "INVALID" if any("not computable" in g or "no agent logs" in g
+                                   or "no per-request" in g or "zero measured" in g
+                                   for g in gate_failures) else "FAIL"
+    else:
+        verdict = "PASS"
 
     agent_rows = []
     for s in sorted(summaries, key=lambda x: x["agent"]):
@@ -868,7 +901,7 @@ def main():
               letter-spacing: -.01em; }}
   .tile .l {{ font-size: 10px; color: var(--muted); text-transform: uppercase;
               letter-spacing: .06em; margin-top: 1px; }}
-  .pass {{ color: var(--green); }} .fail {{ color: var(--red); }}
+  .pass {{ color: var(--green); }} .fail {{ color: var(--red); }} .invalid {{ color: var(--red); }}
   table {{ border-collapse: separate; border-spacing: 0; width: 100%; margin: 10px 0;
            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
            overflow: hidden; box-shadow: var(--shadow); }}
@@ -908,11 +941,11 @@ def main():
 <h2 id="aggregated">Aggregated</h2>
 <div class="tiles">
   <div class="tile"><div class="v {verdict.lower()}">{verdict}</div><div class="l">thresholds</div></div>
-  <div class="tile"><div class="v">{success_pct:.2f}%</div><div class="l">min success</div></div>
-  <div class="tile"><div class="v">{platform_p95:.1f} ms</div><div class="l">platform p95</div></div>
+  <div class="tile"><div class="v">{'—' if success_pct is None else f'{success_pct:.2f}%'}</div><div class="l">min success</div></div>
+  <div class="tile"><div class="v">{'—' if platform_p95 is None else f'{platform_p95:.1f} ms'}</div><div class="l">platform p95</div></div>
   <div class="tile"><div class="v">{'—' if achieved_pct is None else f'{achieved_pct:.1f}%'}</div><div class="l">achieved vs target rate</div></div>
   <div class="tile"><div class="v {verdict.lower() if total_dropped else ''}">{total_dropped:,}</div><div class="l">dropped iterations</div></div>
-  <div class="tile"><div class="v">{throughput_total:.0f}/s</div><div class="l">avg throughput</div></div>
+  <div class="tile"><div class="v">{'—' if throughput_total is None else f'{throughput_total:.0f}/s'}</div><div class="l">avg throughput (measured window)</div></div>
   <div class="tile"><div class="v">{total_reqs:,}</div><div class="l">total requests</div></div>
 </div>
 {'<p class="warn">Note: time-series request counts do not match the end-of-run summaries — the series may be synthetic/preview data.</p>' if fixture_warning else ''}{'<p class="muted">Note: per-request streams are snapshotted while the agents run; the last few seconds of each stream are missing (end-of-run summaries are complete).</p>' if stream_truncated else ''}
@@ -935,29 +968,61 @@ def main():
     # JSON makes the evidence behind any report claim version-controlled).
     lat_stats = pooled_latency_stats(series) if series else None
 
-    # CPU columns for the README table: steady-state medians per PAZ pod and
-    # per loadtest agent, from the monitor CSV or the in-run sampler
-    # (whichever exists). "Steady state" = the middle 60% of each pod's CPU
-    # samples, discarding ramp and teardown edges; the median over that
-    # window is the number the campaign tables quote. Per-pod medians are
-    # then pooled: PAZ = mean of pod medians (pods are symmetric by
-    # anti-affinity design), agents likewise.
-    def steady_median_m(pts):
-        vals = sorted(cpu_m for _, cpu_m, _, _ in pts)
-        if not vals:
-            return None
-        lo, hi = int(len(vals) * 0.2), int(len(vals) * 0.8)
-        return (vals[lo:hi] and sum(vals[lo:hi]) / len(vals[lo:hi])) or None
+    # CPU columns for the README table: steady-state statistics per PAZ pod
+    # and per loadtest agent, from the monitor CSV or the in-run sampler
+    # (whichever exists). Samples are first restricted to the run's measured
+    # interval (sampler data covers warmup and gracefulStop too), then each
+    # pod's chronological middle 60% is kept (ramp/teardown edges discarded)
+    # and the MEDIAN of that window is reported — the actual median, not a
+    # trimmed mean (2026-11-17 review, finding 5). Each PAZ replica is
+    # reported separately; the pooled figure is the mean of per-replica
+    # medians and carries the replica count.
+    def steady_median_m(pts, t_start=None, t_end=None):
+        if t_start is not None:
+            def as_dt(t):
+                if isinstance(t, str):
+                    return datetime.fromisoformat(t.replace("Z", "+00:00"))
+                return t
+            pts = [p for p in pts if t_start <= as_dt(p[0]) <= t_end]
+        if len(pts) < 5:
+            return None, 0
+        # chronological order preserved; drop the temporal edges
+        lo, hi = int(len(pts) * 0.2), int(len(pts) * 0.8)
+        window = [cpu_m for _, cpu_m, _, _ in pts[lo:hi]]
+        window.sort()  # median needs sorted values; only after temporal selection
+        mid = len(window) // 2
+        median = (window[mid] if len(window) % 2
+                  else (window[mid - 1] + window[mid]) / 2)
+        return median, len(window)
 
-    paz_cpu = [m for m in (steady_median_m(p) for p in paz_series.values()) if m]
-    agent_cpu = [m for m in (steady_median_m(p) for p in agent_series.values()) if m]
+    # measured-interval bounds in absolute time (samples share the streams'
+    # frame; bounds from env.json's configured warmup+duration)
+    cpu_t_start = cpu_t_end = None
+    if t0 is not None and cfg_warmup_s is not None:
+        cpu_t_start = t0 + timedelta(seconds=cfg_warmup_s)
+        cpu_t_end = cpu_t_start + timedelta(seconds=(cfg_duration_s or 0))
+    paz_replicas = {}
+    for pod, pts in sorted(paz_series.items()):
+        med, n = steady_median_m(pts, cpu_t_start, cpu_t_end)
+        if med is not None:
+            paz_replicas[pod] = {"median_m": round(med), "samples": n}
+    agent_meds = []
+    agent_samples = 0
+    for pod, pts in sorted(agent_series.items()):
+        med, n = steady_median_m(pts, cpu_t_start, cpu_t_end)
+        if med is not None:
+            agent_meds.append(med)
+            agent_samples += n
+    paz_meds = [r["median_m"] for r in paz_replicas.values()]
     cpu_stats = {
-        # Millicores, steady-state median; the 4-CPU PAZ limit and 500m
-        # agent request are the reference points in the README table.
-        "paz_pod_median_m": round(sum(paz_cpu) / len(paz_cpu)) if paz_cpu else None,
-        "paz_pods": len(paz_cpu),
-        "agent_median_m": round(sum(agent_cpu) / len(agent_cpu)) if agent_cpu else None,
-        "agents": len(agent_cpu),
+        # Millicores; the 4-CPU PAZ limit and 500m agent request are the
+        # reference points in the README table.
+        "paz_pod_median_m": round(sum(paz_meds) / len(paz_meds)) if paz_meds else None,
+        "paz_pods": len(paz_meds),
+        "paz_replicas": paz_replicas,
+        "agent_median_m": round(sum(agent_meds) / len(agent_meds)) if agent_meds else None,
+        "agents": len(agent_meds),
+        "interval": ("measured" if cpu_t_start is not None else "full-sampler"),
     }
 
     summary = {
@@ -965,13 +1030,15 @@ def main():
         "profile": env_meta.get("profile"),
         "timestamp_utc": timestamp,
         "verdict": verdict,
-        "p95_pooled_measured_ms": round(platform_p95, 2),
+        "gate_failures": gate_failures,
+        "p95_pooled_measured_ms": round(platform_p95, 2) if platform_p95 is not None else None,
         "p95_gate_ms": p95_gate,
-        "success_pct": round(success_pct, 2),
+        "success_pct": round(success_pct, 2) if success_pct is not None else None,
         "achieved_vs_target_pct": round(achieved_pct, 2) if achieved_pct is not None else None,
-        "target_rate_per_agent": target_rate,
+        "throughput_measured_per_s": round(throughput_total, 1) if throughput_total is not None else None,
+        "target_rate_per_agent": (cfg_rate / cfg_agents) if (cfg_rate and cfg_agents) else None,
         "dropped_iterations": total_dropped,
-        "total_requests_measured": sum(s["total_requests"] for s in series.values()) if series else total_reqs,
+        "total_requests_measured": sum(s["total_requests"] for s in series.values()) if series else None,
         "measured_duration_s": duration_s,
         # The README-table column set: every latency column from the SAME
         # measured-window pooled distribution (k6's end-of-run line is

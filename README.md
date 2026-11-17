@@ -140,7 +140,12 @@ verbatim in its essentials:
 - A run counts only if it passes the generator-health gates: zero dropped
   iterations, achieved rate ≥ 98% of target, success rate ≥ 99%. A run that
   fails a gate is rerun and both attempts are recorded, never swapped or
-  averaged in.
+  averaged in. Every gate must be **computable** to count: a run whose
+  achieved rate, success rate, or latency cannot be evaluated from its
+  captured evidence gets verdict INVALID, never a default pass (the
+  2026-11-17 review found the original tooling passed evidence-free runs
+  and silently skipped the achieved-rate gate when its log regex went
+  stale).
 - The first run after a fresh deployment is discarded: one throwaway sanity
   run warms the PAZ pods before the campaign's first counted round.
 - Every latency column comes from the **same measured window** — all raw
@@ -157,10 +162,14 @@ verbatim in its essentials:
   note under Step 2).
 - CPU columns come from the 15 s-cadence in-run sampler
   (`usage-during-run.txt`, written by `run-in-cluster.sh`): per-pod
-  steady-state medians over the middle 60% of samples, for the PAZ pods
-  (against the 4-CPU limit) and the loadtest agents. A `scripts/monitor.sh`
-  pod-usage CSV, when one exists for the campaign, is preferred and used
-  instead.
+  statistics restricted to the run's measured window, keeping each pod's
+  chronological middle 60% of samples and taking the **median** of that
+  window (an actual median — the pre-review implementation was a
+  value-sorted trimmed mean), for the PAZ pods (against the 4-CPU limit)
+  and the loadtest agents. Each PAZ replica's median is recorded
+  separately in the run's `summary.json`; the table quotes their mean. A
+  `scripts/monitor.sh` pod-usage CSV, when one exists for the campaign, is
+  preferred and used instead.
 - Server-side ground truth: an end-of-run scrape of PAZ's `cn=Monitor` Gateway
   Timing providers (best-effort — a scrape failure never invalidates a run).
 - **The k6 script and report tooling are frozen for the campaign.** Any
@@ -283,7 +292,11 @@ metric streams, `env.json`, the in-run CPU sampler output, and the
 
 Getting the 1500/s and 2000/s levels green required tuning the per-scenario
 VU knobs (`PRE_ALLOCATED_VUS`, `MAX_VUS` in the stage profiles), and the
-failure modes were all in the load generator, not PAZ. The deciding
+dropped-iterations gate tripped on generator-side artifacts — but the
+server-side events those bursts triggered (PAZ stalled for 8–22 s at the
+transition, and once liveness-killed) are PAZ behavior and were not
+server-side-investigated; the generator was the trigger, not the whole
+story. The deciding
 evidence: at 2000/s the server delivered full rate with 100% checks and a
 clean median in every attempt, while the dropped-iterations gate tripped on
 artifacts that all traced to the warmup→measured transition. With
@@ -340,6 +353,15 @@ measures.
    Subject identity rotates through 100 synthetic VIP users, and PAZ keeps no
    per-subject state on this path, so 100 hot identities exercise the same
    code paths as a cold population.
+   **Token-uniqueness caveat (post-review):** the campaign's `jti` was built
+   from (user, per-VU iteration, second) without the agent identity, so
+   independent k6 agents could mint byte-identical tokens within the same
+   second. Identical claims produce identical decisions, so no verdict is
+   affected — but duplicate tokens partially amortize PAZ's token-validation
+   work through its validation cache, which flatters the absolute numbers
+   slightly and equally at every level. The generator now includes the run
+   id and agent index in `jti` (fixed after the 2026-11-17 review); the
+   campaign's figures should be read as carrying this caveat.
 3. **The envelope is the production envelope.** The load generator builds the
    sideband request exactly as the sibling project's paz-extauthz-adapter
    does (schema pinned by unit tests). The measured traffic is a weighted
@@ -374,33 +396,64 @@ measures.
 ## Reference results — campaign of 2026-11-17
 
 Twelve counted runs, three ascending rounds of the 500 → 1000 → 1500 → 2000
-ladder, all twelve passing the generator-health gates (zero dropped
-iterations, 100% achieved rate, 100% decision success). Each row is the
-median run of its level's three, selected by measured p95; the per-run p95s
-in parentheses show run-to-run spread. The first counted run of the campaign
-was run id `20261117102611`; a pre-campaign sanity run was not needed — the
-PAZ pods had been up and serving full-rate traffic since November 13.
+ladder. Each row is the median run of its level's three, selected by
+measured p95; the per-run p95s quoted below the table show run-to-run
+spread. The figures below are the **corrected** results: the original
+publication (2026-11-17, tooling commit `3b5509b`) carried a 5%-high
+throughput tile, a silently-disabled achieved-rate gate, and mislabeled CPU
+statistics; an external review found the defects, the tooling was fixed
+(`scripts/generate-report.py`, the k6 script, `envelope.mjs`), and every
+run was reprocessed from its preserved raw streams. The latency columns are
+unchanged by the correction — they always came from the measured-window
+streams. The first counted run of the campaign was run id
+`20261117102611`; a pre-campaign sanity run was not needed — the PAZ pods
+had been up and serving full-rate traffic since November 13.
 
 | Stage | Target rate | Requests | avg | median | p90 | p95 | p99 | PAZ CPU/pod | Agent CPU |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 500/s | 500/s | 150,001 | 1.85 ms | 1.66 ms | 2.29 ms | 2.87 ms | 6.22 ms | 318 m | 141 m |
-| 1000/s | 1000/s | 300,022 | 2.12 ms | 1.72 ms | 2.92 ms | 4.24 ms | 8.93 ms | 633 m | 270 m |
-| 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 991 m | 435 m |
-| 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,486 m | 620 m |
+| 500/s | 500/s | 150,001 | 1.85 ms | 1.66 ms | 2.29 ms | 2.87 ms | 6.22 ms | 422 m | 161 m |
+| 1000/s | 1000/s | 300,022 | 2.12 ms | 1.72 ms | 2.92 ms | 4.24 ms | 8.93 ms | 858 m | 328 m |
+| 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 1,328 m | 495 m |
+| 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,863 m | 696 m |
 
-Per-run p95s by level: 500/s — 2.78 / 2.87 / 3.26 ms (median run
-`20261117110514`); 1000/s — 4.24 / 4.18 / 5.26 ms (median run
-`20261117103702`); 1500/s — 8.25 / 8.51 / 13.47 ms (median run
-`20261117112114`); 2000/s — 26.25 / 19.49 / 27.83 ms (median run
-`20261117105622`). CPU medians are per PAZ pod (4-CPU limit) and per
-loadtest agent, steady-state middle-60% of the 15 s in-run sampler. The
-median run of the table row and the CPU medians quoted alongside it come
-from the same run id. The shape of the ladder: the median decision latency
-barely moves across the four levels (1.66 → 1.72 → 1.88 → 2.75 ms through
-4× the load), while the tail bends — p95 grows 9× and p99 8× — and PAZ CPU
-per pod scales almost exactly linearly with offered rate. That is the
-queueing signature of rising utilization, not saturation: at the campaign
-bound PAZ still held ~2.5 CPUs of headroom per pod.
+All twelve runs re-verified after the correction: verdict PASS on every
+run, achieved rate 100.0–100.02% (the few-hundredths over 100 are boundary
+iterations completing after the window's last scheduled arrival), measured
+throughput 500.0–2000.2/s against the configured targets, zero dropped
+iterations, 100% decision success. Per-run p95s by level: 500/s — 2.78 /
+2.87 / 3.26 ms (median run `20261117110514`); 1000/s — 4.24 / 4.18 / 5.26
+ms (median run `20261117103702`); 1500/s — 8.25 / 8.51 / 13.47 ms (median
+run `20261117112114`); 2000/s — 26.25 / 19.49 / 27.83 ms (median run
+`20261117105622`).
+
+Measurement definitions, precisely: the latency columns pool every
+raw datapoint of the measured phase (`phase=measured` per request) across
+all ten agents — the pool is per-agent steady-state pooling, not a
+simultaneous aggregate-load window (agents start within seconds of each
+other; the report charts bucket on a common absolute-time origin). The
+headline latency is k6's `response.timings.duration` — sending + waiting +
+receiving, excluding connection establishment, which steady-state
+connection reuse amortizes to each VU's first iterations; the reports also
+carry `sideband_request_elapsed`, the full call wall time including
+connect. CPU figures are the **median** over each pod's chronological
+middle-60% of samples inside the measured window only (the 15 s in-run
+sampler; per-replica medians in each run's `summary.json`, the table
+quoting their mean). CPU medians from the original publication were a
+value-sorted trimmed mean over all samples including warmup — 25–36% lower
+than the corrected figures; the correction removed that dilution.
+
+The shape of the ladder: the median decision latency barely moves across
+the four levels (1.66 → 1.72 → 1.88 → 2.75 ms through 4× the load), while
+the tail bends — p95 grows 9× and p99 8× — and PAZ CPU per pod scales
+almost exactly linearly with offered rate. This pattern is *consistent
+with* rising utilization as the cause (a queueing interpretation), but the
+campaign measured no per-replica queue depths, thread pools, GC telemetry,
+or CPU throttling, so it remains a hypothesis; the CPU figures alone do
+not rule out internal saturation. At the campaign bound the measured
+1,863 m median sits at 47% of the pods' 4-CPU limit — but the pods share
+3.4-allocatable-CPU nodes with co-tenants, so the limit is a ceiling, not
+a guaranteed capacity: headroom against the *node* is smaller than
+headroom against the limit.
 
 ## Configuration and safety notes
 
