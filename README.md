@@ -71,6 +71,22 @@ behavior; autoscaling (the PAZ topology is fixed at two pods); or a
 comparison against external-PDP mode (this campaign measures
 deployment-package mode only).
 
+## Test environment and sizing
+
+The campaign ran on a shared Kubernetes cluster of six `r5.xlarge` worker
+nodes (4 vCPU / 32 GiB each, 3,400m allocatable CPU after system
+reservations). The PAZ pods carried lab sizing of 2 CPU / 3 GiB requests
+against 4 CPU / 6 GiB limits, one pod per node (the two PAZ nodes together
+held 8 of the cluster's 20.4 allocatable vCPUs); PAP, the package-authoring
+surface, carried 1 CPU / 2 GiB requests and 2 / 4 GiB limits and is idle
+during runs. The ten k6 agent pods requested 500m CPU each with a 4 CPU
+limit, and a required anti-affinity term kept every agent off the two PAZ
+nodes. The reference results are figures for this environment: two PAZ pods
+sized at half their CPU limit, a generator provisioned at ~25% of a node
+per agent, and co-tenant workloads present but off the PAZ nodes. Node
+inventory and pod-to-node placement for every run are recorded in
+`results/<run_id>/env.json`.
+
 ## Measurement protocol
 
 The protocol follows the PF campaign's (`pingfederate-token-exchange-perf`),
