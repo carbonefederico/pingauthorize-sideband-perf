@@ -23,13 +23,15 @@ including goals, non-goals, and the campaign protocol — is
 
 ```mermaid
 flowchart LR
-    subgraph "measured path"
-    k6["k6 agents ×10<br/>(plays the gateway / PEP)"]
-    svc["PAZ Service<br/>cluster-internal HTTPS"]
-    paz["PAZ ×2 StatefulSet<br/>embedded PDP<br/>policy from S3 package store"]
+    subgraph k8s["Kubernetes cluster (namespace paz-perf)"]
+        subgraph "measured path"
+        k6["k6 agents ×10<br/>(plays the gateway / PEP)"]
+        svc["PAZ Service<br/>cluster-internal HTTPS"]
+        paz["PAZ ×2 StatefulSet<br/>embedded PDP"]
+        end
+        jwks["JWKS server ×1<br/>(publishes the subject key's JWKs<br/>for kid perf-subject-key)"]
+        pap["PAP ×1<br/>authoring + inspection (public via ingress)"]
     end
-    jwks["JWKS server ×1<br/>(publishes the subject key's JWKs<br/>for kid perf-subject-key)"]
-    pap["PAP ×1<br/>authoring + inspection (public via ingress)"]
     s3["S3 bucket<br/>(versioned package store)"]
 
     k6 -- "POST /sideband/request<br/>PDG-TOKEN + Bearer<br/>(fresh self-signed RS256 per iteration)" --> svc
