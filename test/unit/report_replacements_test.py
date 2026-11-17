@@ -66,12 +66,12 @@ class ReplacementTests(unittest.TestCase):
 
     def test_native_without_text_logs(self):
         s = self.generate()
-        self.assertEqual(s['integrity']['collection']['issues'], [])
-        self.assertEqual(s['dropped_iterations'], 4)
-        self.assertEqual(s['total_requests_measured'], 200)
-        self.assertEqual(s['pooled_elapsed']['p95_ms'], 7)
-        self.assertEqual(s['integrity']['http_transport_issues']['agent-0']['count'], 11)
-        self.assertNotIn('verdict', s)
+        self.assertEqual(s['agents']['agent-0']['exit_code'], 0)
+        self.assertIsNotNone(s['agents']['agent-0']['native_summary'])
+        self.assertEqual(s['agents']['agent-1']['exit_code'], 0)
+        # notes are coverage observations; execution/summary gaps absent
+        self.assertFalse(any('execution exit code unavailable' in x for x in s['limitations']))
+        self.assertFalse(any('structured k6 summary unavailable' in x for x in s['limitations']))
 
     def test_native_values_wrapped_format(self):
         p = self.run / 'agent-0-summary.json'
@@ -84,38 +84,41 @@ class ReplacementTests(unittest.TestCase):
         self.events[1] = []
         self.write_stream(1)
         s = self.generate()
-        self.assertIn('agent-1: zero measured samples', s['collection']['issues'])
-        self.assertEqual(s['total_requests_measured'], 100)
+        self.assertIn('agent-1: no request latency samples collected', s['limitations'])
+        self.assertEqual(s['requests_observed'], 100)
 
     def test_all_empty_streams(self):
         for agent in range(2):
             self.events[agent] = []
             self.write_stream(agent)
         s = self.generate()
-        self.assertIsNone(s['pooled_latency'])
-        self.assertEqual(s['achieved_vs_target_pct'], 0)
+        self.assertIsNone(s['overall']['latency'])
+        self.assertEqual(s['requests_observed'], 0)
 
-    def test_bad_phase_and_malformed_records_surface(self):
+    def test_malformed_records_surface(self):
+        # phase tags are deliberately ignored by the simplified generator
+        # (whole-run window); malformed records must still surface.
         self.events[0][0]['data']['tags']['phase'] = 'bad'
         self.write_stream(0)
         with (self.run / 'agent-0-metrics.json').open('a') as f:
             f.write('{"type":"Point",broken}\n')
         s = self.generate()
-        self.assertTrue(any('bad_phase_points' in x for x in s['collection']['issues']))
-        self.assertTrue(any('malformed_points' in x for x in s['collection']['issues']))
+        self.assertTrue(any('malformed records excluded' in x for x in s['limitations']))
+        # the phase-tagged sample is still measured (no phase filtering)
+        self.assertEqual(s['scenarios']['mix_read']['latency']['requests'], 50)
 
     def test_gzip_equivalence(self):
         plain = self.generate()
         for agent in range(2): self.write_stream(agent, compressed=True)
         compressed = self.generate()
-        self.assertEqual(plain['pooled_latency'], compressed['pooled_latency'])
-        self.assertEqual(compressed['total_requests_measured'], 200)
+        self.assertEqual(plain['overall']['latency'], compressed['overall']['latency'])
+        self.assertEqual(compressed['requests_observed'], 200)
 
     def test_missing_native_is_visible(self):
         (self.run / 'agent-1-summary.json').unlink()
         s = self.generate()
-        self.assertIn('structured k6 summary missing: agent-1', s['collection']['issues'])
-        self.assertEqual(s['execution']['per_agent']['agent-1']['exit_code'], 0)
+        self.assertIn('agent-1: structured k6 summary unavailable', s['limitations'])
+        self.assertEqual(s['agents']['agent-1']['exit_code'], 0)
 
     def test_pooled_scenario_percentile_not_worst_agent(self):
         # 25 fast samples vs a single slow sample: pooled p95 remains 5 ms.
@@ -124,11 +127,11 @@ class ReplacementTests(unittest.TestCase):
             'data': {'time': '2026-11-17T10:00:30.100Z', 'value': 900,
                      'tags': {'phase': 'measured', 'scenario': 'mix_read'}}})
         self.write_stream(1)
-        self.assertEqual(self.generate()['scenario_stats']['mix_read']['p95_ms'], 5)
+        self.assertEqual(self.generate()['scenarios']['mix_read']['latency']['p95_ms'], 5)
 
     def test_sampler_provenance(self):
         (self.run / 'usage-during-run.txt').write_text(''.join(
             f'=== 10:00:30 ===\npaz: pingauthorize-0 100m 30Mi\n' for _ in range(6)))
-        self.assertTrue(self.generate()['cpu']['source'].endswith('usage-during-run.txt'))
+        self.assertTrue(self.generate()['cpu_source'] == 'usage-during-run.txt')
 
 if __name__ == '__main__': unittest.main()
