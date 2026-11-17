@@ -79,6 +79,11 @@
     background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber-fg);
     padding: 9px 13px; border-radius: 10px; font-size: 12px; margin: 10px 0;
   }
+  .limitbox {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    padding: 9px 13px; border-radius: 10px; font-size: 12px; margin: 10px 0;
+  }
+  .limitbox ul { margin: 6px 0 0 18px; padding: 0; }
   footer { margin-top: 34px; font-size: 10px; color: var(--muted); }
 </style></head><body>
 <header class="hero">
@@ -91,15 +96,23 @@
 </nav>
 <h2 id="aggregated">Aggregated</h2>
 <div class="tiles">
-  <div class="tile"><div class="v invalid">INVALID</div><div class="l">thresholds</div></div>
-  <div class="tile"><div class="v">100.00%</div><div class="l">min success</div></div>
-  <div class="tile"><div class="v">8.5 ms</div><div class="l">platform p95</div></div>
   <div class="tile"><div class="v">100.0%</div><div class="l">achieved vs target rate</div></div>
-  <div class="tile"><div class="v ">0</div><div class="l">dropped iterations</div></div>
   <div class="tile"><div class="v">1500/s</div><div class="l">avg throughput (measured window)</div></div>
+  <div class="tile"><div class="v">8.5 ms</div><div class="l">platform p95</div></div>
+  <div class="tile"><div class="v">—</div><div class="l">expected decision outcomes (measured)</div></div>
+  <div class="tile"><div class="v ">0</div><div class="l">dropped iterations (observation)</div></div>
   <div class="tile"><div class="v">472,456</div><div class="l">total requests</div></div>
 </div>
 <p class="muted">Note: per-request streams are snapshotted while the agents run; the last few seconds of each stream are missing (end-of-run summaries are complete).</p>
+<div class="limitbox">
+  <b>Collection and execution observations</b> — this report characterizes performance; it issues no pass/fail verdict.
+  <ul>
+    <li><b>Execution status:</b> agent-0: completed; agent-1: completed; agent-2: completed; agent-3: completed; agent-4: completed; agent-5: completed; agent-6: completed; agent-7: completed; agent-8: completed; agent-9: completed</li>
+    <li><b>Collection:</b> scenario mix_deny: success evidence incomplete (0 success samples for 42004 requests); scenario mix_hitl: success evidence incomplete (0 success samples for 69019 requests); scenario mix_read: success evidence incomplete (0 success samples for 270028 requests); scenario mix_session: success evidence incomplete (0 success samples for 69023 requests)</li>
+    <li><b>Execution issues:</b> job terminal state not recorded</li>
+    <li><b>Measurement integrity:</b> no dropped iterations; achieved 100.0% of target; configured window 300.0s</li>
+  </ul>
+</div>
 
 <figure class="chart">
   <figcaption>Throughput over time <span class="unit">req/s</span></figcaption>
@@ -336,5 +349,5 @@
 </figure>
   <table><tr><th>metric</th><th class="num">value</th></tr><tr><td>avg</td><td class='num'>3.16 ms</td></tr><tr><td>median</td><td class='num'>1.98 ms</td></tr><tr><td>p90</td><td class='num'>5.56 ms</td></tr><tr><td>p95</td><td class='num'>8.66 ms</td></tr><tr><td>max</td><td class='num'>81.26 ms</td></tr><tr><td>requests</td><td class='num'>47246</td></tr><tr><td>success</td><td class='num'>100.00%</td></tr></table>
 </section>
-<footer>Generated 2026-11-17 17:36 UTC by scripts/generate-report.py — self-contained, no external resources.</footer>
+<footer>Generated 2026-11-17 17:59 UTC by scripts/generate-report.py — self-contained, no external resources.</footer>
 </body></html>

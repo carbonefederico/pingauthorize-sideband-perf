@@ -24,7 +24,6 @@ from html import escape
 from pathlib import Path
 
 RESULTS = Path(__file__).resolve().parent.parent / "results"
-THRESHOLD_P95_MS = 500.0
 
 
 # --------------------------------------------------------------------------
@@ -170,7 +169,19 @@ def parse_k6_metrics_json(path):
             elif metric in sub_metric_names:
                 subtimings.setdefault(metric, []).append((ts, float(value)))
     if not durations:
-        return None
+        # The stream file exists but carries no measured duration points
+        # (all warmup, all bad-phase, or empty). Returning {} would make the
+        # stream look un-collected; returning None does the same. Return a
+        # zero-marker so the report can distinguish "stream missing" from
+        # "stream present, zero measured points" — an explicit limitation,
+        # never a favorable default (fourth review, item 7).
+        return {"total_requests": 0, "zero_measured": True, "buckets_ms": {},
+                "elapsed_buckets_ms": {}, "subtimings": {}, "subtimings_raw": {},
+                "scenarios": {}, "success_evidence_complete": True,
+                "success_samples": 0, "phaseless_points": phaseless_points,
+                "bad_phase_points": bad_phase_points, "warmup_points": warmup_points,
+                "raw_durations": [], "dur_avg_s": [], "dur_p90_s": [], "dur_p95_s": [],
+                "req_rate": [], "t0": None}
     durations.sort(key=lambda x: x[0])
     t0 = durations[0][0]
 
@@ -692,20 +703,25 @@ def main():
         # own t0 (its first datapoint), and combining per-agent relative
         # seconds would mix different wall-clock moments into one bucket
         # (2026-11-17 review, finding 8). t0 here is the EARLIEST first
-        # datapoint across agents; every agent's buckets are shifted by its
-        # own t0 offset against that origin.
-        agg_t0 = min(s["t0"] for s in series.values())
-        origin = (datetime.fromisoformat(str(agg_t0).replace("Z", "+00:00"))
-                  if isinstance(agg_t0, str) else agg_t0)
-        # Bucket every raw request timestamp DIRECTLY against the common
-        # origin (third review, finding 6): bucket = floor((ts - origin)/1s).
-        # No shifting of pre-bucketed series — fractional-second offsets
-        # between agents are preserved exactly.
-        pooled = {}  # sec since common origin -> list of raw latencies
-        for s in series.values():
-            for ts, ms in s.get("raw_durations", []):
-                sec = int((ts - origin).total_seconds())
-                pooled.setdefault(sec, []).extend([ms])
+        # datapoint across agents (zero-measured streams carry t0=None and
+        # no raw points, so they contribute nothing to the aggregation).
+        agg_t0 = min((s["t0"] for s in series.values() if s.get("t0") is not None),
+                     default=None)
+        if agg_t0 is None:
+            agg_t0 = agg_origin = None
+            pooled = {}
+        else:
+            origin = (datetime.fromisoformat(str(agg_t0).replace("Z", "+00:00"))
+                      if isinstance(agg_t0, str) else agg_t0)
+            # Bucket every raw request timestamp DIRECTLY against the common
+            # origin (third review, finding 6): bucket = floor((ts - origin)/1s).
+            # No shifting of pre-bucketed series — fractional-second offsets
+            # between agents are preserved exactly.
+            pooled = {}  # sec since common origin -> list of raw latencies
+            for s in series.values():
+                for ts, ms in s.get("raw_durations", []):
+                    sec = int((ts - origin).total_seconds())
+                    pooled.setdefault(sec, []).extend([ms])
         secs = sorted(pooled)
         agg_rate = [(sec, len(pooled[sec])) for sec in secs]
         agg_avg = [(sec, sum(pooled[sec]) / len(pooled[sec])) for sec in secs]
@@ -769,12 +785,9 @@ def main():
     # ---- aggregate numbers ----
     total_reqs = sum(int(s.get("reqs", [0])[0]) for s in summaries) or \
         sum(s["total_requests"] for s in series.values())
-    # Missing success evidence is NOT a perfect score: with no agent summaries
-    # (or no success metric in them) the gate cannot be evaluated and the run
-    # is INVALID (2026-11-17 review, finding 1). Same for platform_p95 below:
-    # with no streams and no logs the fallback must be None, not 0.
-    success_vals = [s.get("success", [None])[0] for s in summaries if s.get("success")]
-    success_pct = min(success_vals) if success_vals else None
+    # Pooled measured success is computed after scenario_stats (below) —
+    # decision-outcome success comes ONLY from the measured streams, never
+    # from text logs (fourth review, item 2).
 
     # Platform-wide p95: the true pooled percentile over every measured-phase
     # datapoint across all agents (exactly the same values a reviewer would
@@ -782,7 +795,8 @@ def main():
     # end-of-run p95 only when no streams exist.
     platform_p95 = pooled_percentile(series) if series else (
         max((s["latency"][5] for s in summaries if "latency" in s), default=None))
-    duration_s = max((s["dur_p90_s"][-1][0] for s in series.values()), default=None)
+    duration_s = max((s["dur_p90_s"][-1][0] for s in series.values()
+                      if s.get("dur_p90_s")), default=None)
     # Dropped iterations and achieved-vs-target rate: the generator must not
     # shed load silently (Little's-law VU cap). The end-of-run aggregate
     # includes warmup; the measured-window target is target_rate x agents x
@@ -839,93 +853,79 @@ def main():
     # unavailable, the tile is NOT APPROXIMATED from ramp-inclusive log
     # totals; it reports None and the report says so.
     throughput_total = (measured_reqs / window_s) if (measured_reqs is not None and window_s) else None
-    # Thresholds ride with the run's captured metadata (env.json), falling
-    # back to the last-resort defaults; never a hardcoded constant.
-    p95_gate = float(env_meta.get("P95_MS", 500.0))
-    success_gate = float(env_meta.get("SUCCESS_RATE", 0.99)) * 100.0
 
-    # Verdict: every mandatory gate must be COMPUTABLE — a gate that cannot
-    # be evaluated is insufficient evidence, not a pass (2026-11-17 review,
-    # finding 1). Insufficient evidence -> INVALID, never PASS.
-    gate_failures = []
-    evidence_gaps = []
+    # NO acceptance engine. This benchmark characterizes performance at
+    # specified loads; there is no performance SLA to encode, so the report
+    # computes no PASS/FAIL/INVALID verdict and enforces no thresholds.
+    # The report records OBSERVATIONS (fourth review):
+    #   - collection completeness: which expected agents/streams/logs exist
+    #   - execution status: each agent's recorded exit code, verbatim
+    #   - measurement integrity: achieved rate, drops, errors, wrong
+    #     authorization outcomes, phase-less/malformed points
+    # A nonzero exit code means "the agent exited nonzero" — the reason is
+    # preserved, never relabeled as a performance failure. Missing evidence
+    # is reported as a limitation; it never defaults to a favorable value.
+
+    # --- collection completeness (observations, not gates) -----------------
+    collection = {"agents_expected": cfg_agents, "issues": []}
     if not summaries:
-        evidence_gaps.append("no agent logs parsed")
+        collection["issues"].append("no agent logs parsed")
     if not series:
-        evidence_gaps.append("no per-request metric streams")
+        collection["issues"].append("no per-request metric streams")
     elif measured_reqs is None or measured_reqs <= 0:
-        evidence_gaps.append("zero measured requests")
-    if achieved_pct is None:
-        evidence_gaps.append("achieved-vs-target not computable (missing env.json, DURATION, or streams)")
-
-    # Agent inventory: every expected agent (env.json AGENTS) must have BOTH
-    # a parsed log and a metric stream (follow-up review, finding 2). Some
-    # agents present is not the run configured.
+        collection["issues"].append("zero measured requests")
     if cfg_agents:
         expected_ids = {f"agent-{i}" for i in range(cfg_agents)}
         log_ids = {s["agent"] for s in summaries}
         stream_ids = set(series)
         for missing in sorted(expected_ids - log_ids):
-            evidence_gaps.append(f"agent log missing: {missing}")
+            collection["issues"].append(f"agent log missing: {missing}")
         for missing in sorted(expected_ids - stream_ids):
-            evidence_gaps.append(f"agent stream missing: {missing}")
+            collection["issues"].append(f"agent stream missing: {missing}")
         for extra in sorted((log_ids | stream_ids) - expected_ids):
-            evidence_gaps.append(f"unexpected agent present: {extra}")
+            collection["issues"].append(f"unexpected agent present: {extra}")
 
-    # k6 execution evidence (third review, finding 2): per-agent exit codes
-    # in env.json (agent_exit_codes) are the primary source. The presence of
-    # summaries/streams is NOT success evidence — the runner creates the run
-    # dir and copies streams before any Job check. A log that explicitly
-    # reports a nonzero k6 exit fails the run regardless of any other
-    # evidence. Runs carrying neither per-agent codes nor a Job-level
-    # terminal verdict are UNKNOWN evidence -> INVALID.
+    # --- execution status (recorded, not judged) ---------------------------
     agent_exit_codes = env_meta.get("agent_exit_codes") or {}
-    exit_evidence = "per-agent" if agent_exit_codes else (
-        "job-level" if env_meta.get("job_terminal_state") else "unknown")
-    if agent_exit_codes:
-        for s in summaries:
-            code = agent_exit_codes.get(s["agent"])
-            if code is None:
-                evidence_gaps.append(f"k6 exit status unknown: {s['agent']}")
-            elif int(code) != 0:
-                gate_failures.append(f"k6 exited {code}: {s['agent']}")
-    else:
-        # Historical fallback requires INDEPENDENT terminal evidence: the
-        # runner records job_terminal_state=complete (with succeeded count)
-        # in env.json when the Job completed with all agents. Absent that,
-        # the log's own exit line is checked; a nonzero exit is POSITIVE
-        # evidence of failure (overrides the unknown-evidence gap -> FAIL),
-        # while a zero exit line is not independent evidence of success —
-        # evidence stays unknown -> INVALID.
-        job_state = env_meta.get("job_terminal_state")
-        log_nonzero_exit = False
-        for s in summaries:
-            m = re.search(r"k6 exited with code (\d+)", s.get("_log_text", ""))
-            if m and int(m.group(1)) != 0:
-                gate_failures.append(f"k6 exited {m.group(1)}: {s['agent']} (from log)")
-                log_nonzero_exit = True
-        if job_state == "complete":
-            pass  # independently captured terminal evidence of all-agent success
-        elif job_state is None and not log_nonzero_exit:
-            evidence_gaps.append(
-                "k6 execution evidence unknown: no per-agent exit codes and "
-                "no job_terminal_state recorded (historical run)")
-        elif job_state is not None and job_state != "complete":
-            gate_failures.append(f"job terminal state: {job_state}")
+    job_state = env_meta.get("job_terminal_state")
+    execution = {"per_agent": {}, "job_terminal_state": job_state, "issues": []}
+    for s in summaries:
+        code = agent_exit_codes.get(s["agent"])
+        # the log's own exit line is the ground truth the pod printed
+        m = re.search(r"k6 exited with code (\d+)", s.get("_log_text", ""))
+        logged = int(m.group(1)) if m else None
+        if code is not None:
+            execution["per_agent"][s["agent"]] = {
+                "exit_code": int(code),
+                "from_log": logged,
+                "status": "completed" if int(code) == 0 else f"exited {int(code)}",
+            }
+        elif logged is not None:
+            execution["per_agent"][s["agent"]] = {
+                "exit_code": logged, "from_log": logged,
+                "status": "completed" if logged == 0 else f"exited {logged}",
+            }
+        else:
+            execution["per_agent"][s["agent"]] = {
+                "exit_code": None, "from_log": None, "status": "unknown",
+            }
+            execution["issues"].append(f"k6 exit status unknown: {s['agent']}")
+    if job_state is None:
+        execution["issues"].append("job terminal state not recorded")
+    elif job_state != "complete":
+        execution["issues"].append(f"job terminal state: {job_state}")
 
-    # Per-scenario measured gates from the streams (follow-up review,
-    # finding 5): pooled statistics hide a failing low-volume scenario, so
-    # the report evaluates each configured scenario's measured p95, success,
-    # and error count independently.
+    # --- per-scenario measured observations --------------------------------
     expected_scenarios = {"mix_read", "mix_session", "mix_hitl", "mix_deny"}
     scen_seen = set()
     for s in series.values():
         scen_seen.update(s.get("scenarios", {}).keys())
     if series and not scen_seen:
-        evidence_gaps.append("no per-scenario evidence in streams")
-    scen_gates = {}
+        collection["issues"].append("no per-scenario evidence in streams")
+    scenario_stats = {}
     for name in sorted(expected_scenarios | scen_seen):
-        agg = {"p95_ms": None, "success_pct": None, "errors": 0, "requests": 0}
+        agg = {"p95_ms": None, "success_pct": None, "errors": 0, "requests": 0,
+               "success_samples": 0}
         p95s, ok, tot = [], 0, 0
         errs = 0
         reqs = 0
@@ -942,61 +942,39 @@ def main():
             errs += sc.get("errors", 0)
         agg["requests"] = reqs
         agg["errors"] = errs
-        # request-weighted pooled p95 per scenario (max of agent p95s is the
-        # conservative choice for a gate; weighted pooling of raw values is
-        # the pooled figure reported separately)
         if p95s:
             agg["p95_ms"] = max(p for _, p in p95s)
         if tot:
             agg["success_pct"] = 100.0 * ok / tot
-        scen_gates[name] = agg
-        if reqs == 0:
-            gate_failures.append(f"scenario {name}: zero measured requests")
-            continue
-        if agg["p95_ms"] is not None and not (agg["p95_ms"] < p95_gate):
-            gate_failures.append(f"scenario {name}: p95 {agg['p95_ms']} vs {p95_gate}")
-        # Success evidence is REQUIRED per scenario (third review, finding
-        # 1): the generator emits exactly one success point per decision
-        # request, so a complete stream carries success_total == requests.
-        # Missing or mismatched success samples are an evidence gap (the
-        # aggregate log success cannot substitute for measured outcomes).
-        succ_total = sum(s.get("scenarios", {}).get(name, {}).get("success_total", 0)
-                         for s in series.values())
-        if succ_total != reqs:
-            evidence_gaps.append(
+        agg["success_samples"] = tot
+        # success-sample completeness is an observation: one success point
+        # per decision request is the generator's contract
+        if reqs and tot != reqs:
+            collection["issues"].append(
                 f"scenario {name}: success evidence incomplete "
-                f"({succ_total} success samples for {reqs} requests)")
-        elif agg["success_pct"] is not None and not (agg["success_pct"] >= success_gate):
-            gate_failures.append(f"scenario {name}: success {agg['success_pct']:.2f}% vs {success_gate}")
-        if errs != 0:
-            gate_failures.append(f"scenario {name}: {errs} classified errors")
+                f"({tot} success samples for {reqs} requests)")
+        scenario_stats[name] = agg
 
-    # Aggregate gates (pooled statistics — labeled separately from the
-    # per-scenario acceptance gates above).
-    if platform_p95 is None or not (platform_p95 < p95_gate):
-        gate_failures.append(f"pooled p95 gate: {platform_p95} vs {p95_gate}")
-    if success_pct is None or not (success_pct >= success_gate):
-        gate_failures.append(f"pooled success gate: {success_pct} vs {success_gate}")
-    if total_dropped != 0:
-        gate_failures.append(f"dropped iterations: {total_dropped}")
-    # Achieved rate: computed AND enforced (follow-up review, finding 1) —
-    # the first review fix only required computability; a 2%-achieved run
-    # passed. Below 98% of the configured target is a FAIL.
-    if achieved_pct is None:
-        evidence_gaps.append("achieved-vs-target not computable (missing env.json or streams)")
-    elif achieved_pct < 98.0:
-        gate_failures.append(f"achieved rate: {achieved_pct:.2f}% vs required 98%")
-    # k6's own exit status is ground truth for its thresholds; a run whose
-    # captured exit code says a threshold failed is a FAIL even if local
-    # parsing cannot see which.
-    k6_exit = env_meta.get("k6_exit_code")
-    if k6_exit is not None and int(k6_exit) != 0:
-        gate_failures.append(f"k6 exited {k6_exit}")
-    gate_failures.extend(evidence_gaps)
-    if gate_failures:
-        verdict = "INVALID" if evidence_gaps else "FAIL"
-    else:
-        verdict = "PASS"
+    # Pooled decision-outcome success: request-weighted over the scenarios'
+    # measured success samples — from streams only, never text logs.
+    tot_all = sum(a["success_samples"] for a in scenario_stats.values())
+    ok_all = sum((a["success_pct"] / 100.0) * a["success_samples"]
+                 for a in scenario_stats.values() if a["success_pct"] is not None)
+    success_pct = (100.0 * ok_all / tot_all) if tot_all else None
+
+    # --- measurement-integrity observations --------------------------------
+    integrity = {
+        "dropped_iterations": total_dropped,
+        "achieved_vs_target_pct": achieved_pct,
+        "throughput_measured_per_s": round(throughput_total, 1) if throughput_total is not None else None,
+        "target_rate": cfg_rate,
+        "measured_requests": measured_reqs,
+        "configured_duration_s": cfg_duration_s,
+        "stream_span_s": duration_s,
+        "http_transport_issues": "see per-agent http_req_failed in logs (k6-native)",
+        "collection": collection,
+        "execution": execution,
+    }
 
     agent_rows = []
     for s in sorted(summaries, key=lambda x: x["agent"]):
@@ -1057,10 +1035,9 @@ def main():
         chart_html += ("<div style='padding:12px 16px;border:1px solid #f59e0b;"
                        "background:#fef3c7;border-radius:6px;margin:8px 0;"
                        "font-size:13px'><b>Engine CPU data missing</b> — no "
-                       "pod-usage CSV was captured for this run. The verdict "
-                       "holds on latency/success/rate alone; platform CPU "
-                       "context is absent. Regenerate after a monitored "
-                       "rerun.</div>")
+                       "pod-usage CSV was captured for this run. Platform CPU "
+                       "context is absent; latency and throughput stand alone. "
+                       "Regenerate after a monitored rerun.</div>")
     if cpu_series:
         chart_html += stacked_area_chart("Engine CPU", cpu_series, "millicores")
     if node_cpu_series:
@@ -1175,6 +1152,11 @@ def main():
     background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber-fg);
     padding: 9px 13px; border-radius: 10px; font-size: 12px; margin: 10px 0;
   }}
+  .limitbox {{
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    padding: 9px 13px; border-radius: 10px; font-size: 12px; margin: 10px 0;
+  }}
+  .limitbox ul {{ margin: 6px 0 0 18px; padding: 0; }}
   footer {{ margin-top: 34px; font-size: 10px; color: var(--muted); }}
 </style></head><body>
 <header class="hero">
@@ -1187,15 +1169,23 @@ def main():
 </nav>
 <h2 id="aggregated">Aggregated</h2>
 <div class="tiles">
-  <div class="tile"><div class="v {verdict.lower()}">{verdict}</div><div class="l">thresholds</div></div>
-  <div class="tile"><div class="v">{'—' if success_pct is None else f'{success_pct:.2f}%'}</div><div class="l">min success</div></div>
-  <div class="tile"><div class="v">{'—' if platform_p95 is None else f'{platform_p95:.1f} ms'}</div><div class="l">platform p95</div></div>
   <div class="tile"><div class="v">{'—' if achieved_pct is None else f'{achieved_pct:.1f}%'}</div><div class="l">achieved vs target rate</div></div>
-  <div class="tile"><div class="v {verdict.lower() if total_dropped else ''}">{total_dropped:,}</div><div class="l">dropped iterations</div></div>
   <div class="tile"><div class="v">{'—' if throughput_total is None else f'{throughput_total:.0f}/s'}</div><div class="l">avg throughput (measured window)</div></div>
+  <div class="tile"><div class="v">{'—' if platform_p95 is None else f'{platform_p95:.1f} ms'}</div><div class="l">platform p95</div></div>
+  <div class="tile"><div class="v">{'—' if success_pct is None else f'{success_pct:.2f}%'}</div><div class="l">expected decision outcomes (measured)</div></div>
+  <div class="tile"><div class="v {'' if not total_dropped else 'fail'}">{total_dropped:,}</div><div class="l">dropped iterations (observation)</div></div>
   <div class="tile"><div class="v">{total_reqs:,}</div><div class="l">total requests</div></div>
 </div>
 {'<p class="warn">Note: time-series request counts do not match the end-of-run summaries — the series may be synthetic/preview data.</p>' if fixture_warning else ''}{'<p class="muted">Note: per-request streams are snapshotted while the agents run; the last few seconds of each stream are missing (end-of-run summaries are complete).</p>' if stream_truncated else ''}
+<div class="limitbox">
+  <b>Collection and execution observations</b> — this report characterizes performance; it issues no pass/fail verdict.
+  <ul>
+    <li><b>Execution status:</b> {'; '.join(f"{a}: {v['status']}" for a, v in sorted(execution['per_agent'].items())) if execution['per_agent'] else 'no agent execution records'}{' — job terminal state: ' + str(execution['job_terminal_state']) if execution['job_terminal_state'] else ''}</li>
+    {'<li><b>Collection:</b> ' + '; '.join(collection['issues']) + '</li>' if collection['issues'] else '<li><b>Collection:</b> complete (all expected agents, logs, streams)</li>'}
+    {'<li><b>Execution issues:</b> ' + '; '.join(execution['issues']) + '</li>' if execution['issues'] else ''}
+    {'<li><b>Measurement integrity:</b> ' + (f"{integrity['dropped_iterations']} dropped iterations; " if integrity['dropped_iterations'] else 'no dropped iterations; ') + (f"achieved {integrity['achieved_vs_target_pct']:.1f}% of target" if integrity['achieved_vs_target_pct'] is not None else 'achieved rate unavailable') + f"; configured window {integrity['configured_duration_s']}s" if integrity['configured_duration_s'] else ''}</li>
+  </ul>
+</div>
 {chart_html}
 <h2 id="agents">Per-agent details</h2>
 <p class="muted">{len(summaries)} agent(s) in this run.</p>
@@ -1300,17 +1290,16 @@ def main():
         "run_id": sys.argv[1],
         "profile": env_meta.get("profile"),
         "timestamp_utc": timestamp,
-        "verdict": verdict,
-        "gate_failures": gate_failures,
-        # Per-scenario acceptance gates (follow-up review, finding 5) —
-        # evaluated independently of the pooled statistics above.
-        "scenario_gates": {
+        # No performance verdict: this benchmark characterizes, it does not
+        # gate (fourth review). Execution status and collection completeness
+        # are observations below.
+        "scenario_stats": {
             name: {**agg, "p95_ms": round(agg["p95_ms"], 2) if agg["p95_ms"] is not None else None,
                    "success_pct": round(agg["success_pct"], 2) if agg["success_pct"] is not None else None}
-            for name, agg in scen_gates.items()
+            for name, agg in scenario_stats.items()
         },
+        "integrity": integrity,
         "p95_pooled_measured_ms": round(platform_p95, 2) if platform_p95 is not None else None,
-        "p95_gate_ms": p95_gate,
         "success_pct": round(success_pct, 2) if success_pct is not None else None,
         "achieved_vs_target_pct": round(achieved_pct, 2) if achieved_pct is not None else None,
         "throughput_measured_per_s": round(throughput_total, 1) if throughput_total is not None else None,

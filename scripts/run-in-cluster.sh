@@ -2,7 +2,7 @@
 # run-in-cluster.sh — provision the k6 Job, stream it, and collect results
 # into results/<run_id>/. Ported from the PF campaign's runner; the changes
 # are the SUT inventory (2 PAZ pods, label pingauthorize) and the metric
-# stream file names. Exits non-zero if the k6 Job fails (threshold or check
+# stream file names. Exits non-zero if the k6 Job fails (script or collection
 # failure), after saving everything the report needs.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -27,14 +27,15 @@ run_dir="${ROOT_DIR}/results/${run_id}"
 mkdir -p "${run_dir}"
 
 # Run metadata: every resolved variable that defines the run, plus the
-# cluster context and the SUT pod inventory. The report reads thresholds
-# from here so the PASS/FAIL gate is the same one the profiles declared.
+# cluster context and the SUT pod inventory. No performance thresholds are
+# captured: the benchmark characterizes performance and applies no
+# acceptance criteria (fourth review).
 {
   echo "{"
   echo "  \"run_id\": \"${run_id}\","
   echo "  \"profile\": \"${PROFILE:-<none, .env only>}\","
   echo "  \"timestamp_utc\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
-  for v in AGENTS RATE DURATION WARMUP PRE_ALLOCATED_VUS MAX_VUS P95_MS SUCCESS_RATE \
+  for v in AGENTS RATE DURATION WARMUP PRE_ALLOCATED_VUS MAX_VUS \
            SUBJECT_ISSUER SUBJECT_USER_COUNT MCP_AUD NAMESPACE PAZ_RELEASE LOADTEST_RELEASE; do
     [[ -n "${!v:-}" ]] && printf '  "%s": "%s",\n' "${v}" "${!v}"
   done
@@ -62,7 +63,7 @@ helm -n "${NAMESPACE}" uninstall "${LOADTEST_RELEASE}" >/dev/null 2>&1 || true
 helm -n "${NAMESPACE}" install "${LOADTEST_RELEASE}" "${ROOT_DIR}/helm/loadtest" "${helm_args[@]}"
 
 job_name="${LOADTEST_RELEASE}-${run_id}"
-echo "Following ${job_name}; the command exits non-zero if k6 thresholds fail."
+echo "Following ${job_name}; the command exits non-zero if k6 fails to run or the Job fails."
 kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
   -l "job-name=${job_name}" --timeout=5m
 
@@ -199,7 +200,7 @@ kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide > "${run_dir}/job.txt" 2
 "${ROOT_DIR}/scripts/scrape-monitor.sh" "${run_dir}" || true
 
 if [[ "${succeeded}" != "${agent_count}" ]]; then
-  echo "k6 Job failed (usually because a request check or threshold failed); evidence captured to ${run_dir}." >&2
+  echo "k6 Job failed (a k6 script/check error or pod failure); evidence captured to ${run_dir}." >&2
   kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide >&2
   exit 1
 fi

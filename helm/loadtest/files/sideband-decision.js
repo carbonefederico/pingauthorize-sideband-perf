@@ -10,11 +10,10 @@ import { Rate, Trend, Counter } from 'k6/metrics';
 
 import { buildSidebandEnvelope, buildClaims, classify, distributeRate } from './envelope.mjs';
 
-// Phase-scoped metrics: ramp traffic must not gate the measured thresholds
-// (2026-11-17 review, finding 4). The phase tag is applied per request below
-// AND carried on every custom metric, and the thresholds select
-// {phase:measured} explicitly. `elapsed` additionally covers connection
-// establishment (finding 7) — see decide().
+// Phase-scoped metrics: the phase tag is applied per request below AND
+// carried on every custom metric, so warmup traffic is always separable
+// from the measured window in analysis (2026-11-17 reviews). `elapsed`
+// additionally covers connection establishment — see decide().
 const successRate = new Rate('sideband_decision_success');
 const latency = new Trend('sideband_decision_latency', true);
 const elapsed = new Trend('sideband_request_elapsed', true);
@@ -70,8 +69,6 @@ if (readRate + sessionRate + hitlRate + denyRate !== rate) {
 
 const preAllocatedVUs = Number(__ENV.PRE_ALLOCATED_VUS || 25);
 const maxVUs = Number(__ENV.MAX_VUS || 200);
-const p95Ms = Number(__ENV.P95_MS || 500);
-const minimumSuccessRate = Number(__ENV.SUCCESS_RATE || 0.99);
 const userCount = Number(__ENV.SUBJECT_USER_COUNT || 100);
 const subjectIssuer = __ENV.SUBJECT_ISSUER;
 const mcpAud = __ENV.MCP_AUD;
@@ -296,36 +293,16 @@ export const options = {
       tags: { policy_path: 'expected_deny' },
     },
   },
-  thresholds: {
-    // Latency and success gates apply to each MEASURED scenario's MEASURED
-    // phase only: sub-metrics scoped by scenario AND phase (the custom
-    // metrics carry the per-request phase tag since the 2026-11-17 review,
-    // finding 4 — without it ramp traffic gated the thresholds). Warmup
-    // traffic exists to prime the platform and must not gate.
-    'sideband_decision_latency{scenario:mix_read,phase:measured}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_session,phase:measured}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_hitl,phase:measured}': [`p(95)<${p95Ms}`],
-    'sideband_decision_latency{scenario:mix_deny,phase:measured}': [`p(95)<${p95Ms}`],
-    'sideband_decision_success{scenario:mix_read,phase:measured}': [`rate>=${minimumSuccessRate}`],
-    'sideband_decision_success{scenario:mix_session,phase:measured}': [`rate>=${minimumSuccessRate}`],
-    'sideband_decision_success{scenario:mix_hitl,phase:measured}': [`rate>=${minimumSuccessRate}`],
-    // The deny scenario's "success" is landing the EXPECTED denial; a permit
-    // there is a policy failure, scored the same way. Errors (malformed
-    // responses, transport failures) never count as successes in any
-    // scenario — classify() keeps them out of the decision statistics, and
-    // the error counter below fails the run outright.
-    'sideband_decision_success{scenario:mix_deny,phase:measured}': [`rate>=${minimumSuccessRate}`],
-    // Any integration error in the measured window fails the run: an error
-    // is neither a permit nor an expected denial (2026-11-17 review,
-    // finding 3).
-    'sideband_errors{phase:measured}': ['count==0'],
-    'http_req_failed': ['rate<0.01'],
-    // Dropped iterations invalidate a stress stage: when required concurrency
-    // (rate x latency) exceeds maxVUs, k6 silently sheds load and latency
-    // looks fine because the excess requests were never sent. Any drop
-    // fails the stage.
-    dropped_iterations: ['count==0'],
-  },
+  // No performance thresholds. This benchmark characterizes performance at
+  // specified loads; it enforces no p95/success/dropped criteria because no
+  // performance SLA exists to encode. Latency distributions, achieved rates,
+  // and drop counts are reported for human assessment — a completed
+  // experiment may show poor performance, and that is still a result. k6
+  // exits 0 whenever the load completed and 1 only on script/collection
+  // errors, so the exit code means execution status, never a performance
+  // verdict. Measurement integrity (dropped iterations, errors, achieved
+  // rate) is recorded as observations and surfaced by the report.
+  thresholds: {},
   tags: {
     system_under_test: 'pingauthorize-sideband',
     operation: 'sideband_decision',

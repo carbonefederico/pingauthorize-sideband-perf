@@ -87,8 +87,6 @@ kubectl -n "${NAMESPACE}" create secret generic paz-loadtest \
   --from-literal=REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-30s}" \
   --from-literal=PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-25}" \
   --from-literal=MAX_VUS="${MAX_VUS:-200}" \
-  --from-literal=P95_MS="${P95_MS:-500}" \
-  --from-literal=SUCCESS_RATE="${SUCCESS_RATE:-0.99}" \
   --from-literal=INSECURE_SKIP_TLS_VERIFY="${INSECURE_SKIP_TLS_VERIFY:-true}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
