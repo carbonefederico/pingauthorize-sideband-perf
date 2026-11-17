@@ -16,6 +16,7 @@ import re
 from statistics import median
 
 RESULTS = Path(__file__).resolve().parent.parent / 'results'
+REPORTS = Path(__file__).resolve().parent.parent / 'reports'
 TRACKED = {'http_req_duration', 'sideband_request_elapsed', 'sideband_decision_success',
            'sideband_errors', 'sideband_denials', 'http_req_failed', 'dropped_iterations'}
 
@@ -278,48 +279,94 @@ def chart(title, series, unit):
 
 def render(result, buckets, pods):
     overall = result['overall']
-    lat = overall['latency'] or {}
-    headers = ['Population', 'Requests', 'Average ms', 'Median ms', 'p90 ms', 'p95 ms', 'p99 ms', 'Max ms', 'Expected outcomes', 'Errors', 'Incorrect decisions']
+    populations = [overall] + list(result['scenarios'].values()) + [g['statistics'] for g in result['agents'].values()]
+    show_errors = any(g['classified_errors'] is not None for g in populations)
+    show_wrong = any(g['incorrect_decisions'] is not None for g in populations)
+    headers = ['Population', 'Requests', 'Average ms', 'Median ms', 'p90 ms', 'p95 ms', 'p99 ms', 'Max ms', 'Expected outcomes']
+    if show_errors:
+        headers.append('Integration errors')
+    if show_wrong:
+        headers.append('Incorrect decisions')
     def row(name, g):
         values = g['latency'] or {}
-        return [name, g['requests']] + [fmt(values.get(k)) for k in ['avg_ms','median_ms','p90_ms','p95_ms','p99_ms','max_ms']] + [fmt(g['expected_outcomes_pct'], '%'), fmt(g['classified_errors']), fmt(g['incorrect_decisions'])]
+        cells = [name, f"{g['requests']:,}"] + [fmt(values.get(k)) for k in ['avg_ms','median_ms','p90_ms','p95_ms','p99_ms','max_ms']]
+        cells.append(fmt(g['expected_outcomes_pct'], '%'))
+        if show_errors:
+            cells.append(fmt(g['classified_errors']))
+        if show_wrong:
+            cells.append(fmt(g['incorrect_decisions']))
+        return cells
+    def pod_label(name):
+        if '-loadtest-' in name:
+            tail = name.split('-loadtest-', 1)[1].split('-')
+            return f'Generator {tail[1]}' if len(tail) > 1 else 'Generator'
+        return f'PAZ {name.rsplit("-", 1)[-1]}' if 'pingauthorize' in name else name
+    top_headers = ['Requests', 'Duration including ramp', 'Whole-run average', 'Plateau target']
+    top_values = [f"{result['requests_observed']:,}", fmt(result['configured_duration_s'], ' s'),
+                  fmt(result['average_requests_per_s'], '/s'), fmt(result['plateau_target_per_s'], '/s')]
+    if result['dropped_iterations'] is not None:
+        top_headers.append('Dropped iterations')
+        top_values.append(fmt(result['dropped_iterations']))
     html = ['<!doctype html><meta charset="utf-8"><title>Sideband performance</title>',
-            '<style>body{font:15px system-ui;max-width:1150px;margin:32px auto;padding:0 20px;color:#172033}table{border-collapse:collapse;width:100%;margin:20px 0}td,th{border:1px solid #ddd;padding:7px;text-align:right}td:first-child,th:first-child{text-align:left}svg{width:100%;max-height:270px}text{font-size:11px;fill:#555}h2{margin-top:32px}</style>',
+            '<style>body{font:15px system-ui;max-width:1150px;margin:32px auto;padding:0 20px;color:#172033}table{border-collapse:collapse;width:100%;margin:20px 0}td,th{border:1px solid #ddd;padding:7px;text-align:right}td:first-child,th:first-child{text-align:left}svg{width:100%;max-height:270px}text{font-size:11px;fill:#555}h2{margin-top:32px}.notes{background:#f4f6f8;padding:12px 18px;margin-top:24px}</style>',
             f'<h1>PingAuthorize Sideband — {escape(result["run_id"])}</h1>',
-            '<p>Whole run, including the initial ramp. Descriptive measurements; no performance verdict.</p>',
-            table(['Requests observed', 'Full configured duration', 'Average throughput', 'Plateau target', 'Expected volume with linear ramp', 'Dropped iterations'],
-                  [[result['requests_observed'], fmt(result['configured_duration_s'], ' s'), fmt(result['average_requests_per_s'], '/s'),
-                    fmt(result['plateau_target_per_s'], '/s'), fmt(result['expected_requests_for_linear_ramp']), fmt(result['dropped_iterations'])]]),
-            '<p>Average throughput includes the ramp, so it is expected to be below the plateau target. '
-            'Request counts describe collected responses; inspect agent coverage for incomplete runs. '
-            'Interrupted iteration counts are unavailable.</p>', '<h2>Combined latency and correctness</h2>', table(headers, [row('All agents', overall)]),
-            '<p>HTTP latency is sending + waiting + receiving. Connection setup is included only in full-call elapsed time.</p>',
-            '<h2>Full-call elapsed latency</h2>', table(['Average ms', 'p95 ms', 'p99 ms', 'Samples'], [[fmt((overall['elapsed'] or {}).get(k)) for k in ['avg_ms','p95_ms','p99_ms','requests']]]),
-            '<h2>Scenarios</h2>', table(headers, [row(name,g) for name,g in result['scenarios'].items()]),
-            '<h2>Agents</h2>', table(headers, [row(name,g['statistics']) for name,g in result['agents'].items()]),
-            table(['Agent','Exit code','First response (UTC)','Last response (UTC)','Response coverage span'],
-                  [[a, g['exit_code'] if g['exit_code'] is not None else 'unknown',
-                    datetime.fromtimestamp(g[k], timezone.utc).isoformat() if g.get(k) is not None else 'unavailable',
-                    datetime.fromtimestamp(g['last_response_utc'], timezone.utc).isoformat() if g.get('last_response_utc') is not None else 'unavailable',
-                    fmt(g.get('observed_response_span_s'),' s')] for a,g in result['agents'].items() for k in ['first_response_utc']])]
-    origin = min(buckets) if buckets else 0
+            table(top_headers, [top_values]),
+            '<p>Results include the ramp. The whole-run average is therefore lower than the plateau target.</p>',
+            '<h2>Latency and outcomes</h2>', table(headers, [row('All agents', overall)])]
     if buckets:
-        timeline = range(origin, max(buckets) + 1)
-        html.append(chart('Throughput', [('Responses/s', [(t-origin,len(buckets.get(t, []))) for t in timeline])], 'requests/s'))
-        html.append(chart('Latency over time', [(label, [(t-origin, stats(v)[key]) for t,v in sorted(buckets.items())])
-                                               for label,key in [('Average','avg_ms'), ('p90','p90_ms')]], 'ms'))
-    html.extend(['<h2>CPU and memory</h2>', '<p>Run-local sampler, clipped to the observed traffic interval. Medians include the ramp. Memory is the sampled peak, not an instantaneous peak.</p>',
-                 table(['Pod','Median CPU (m)','Samples','Peak memory MiB'], [[pod,fmt(g['median_m']),g['samples'],fmt(g['peak_memory_mib'])] for pod,g in result['cpu'].items()])])
-    html.append(chart('Pod CPU', [(p,[(t-origin,c) for t,c,_ in pts]) for p,pts in sorted(pods.items())], 'millicores'))
-    html.extend(['<h2>Collection observations</h2>', '<ul>' + ''.join(f'<li>{escape(note)}</li>' for note in result['limitations']) + '</ul>' if result['limitations'] else '<p>No collection discrepancies detected by these checks.</p>',
-                 '<p>Native totals are from k6 structured summaries. Latency, correctness, and charts use all raw samples; phase tags are deliberately ignored. Missing raw files cannot be reconstructed from summaries.</p>'])
+        origin = min(buckets)
+        html.append(chart('Throughput', [('Responses/s', [(t-origin,len(buckets.get(t, []))) for t in range(origin,max(buckets)+1)])], 'requests/s'))
+        html.append(chart('Latency over time', [(label,[(t-origin,stats(v)[key]) for t,v in sorted(buckets.items())])
+                    for label,key in [('Average','avg_ms'),('p90','p90_ms')]], 'ms'))
+    else:
+        origin = 0
+    if overall['elapsed'] is not None:
+        e = overall['elapsed']
+        html.extend(['<h2>Full-call elapsed latency</h2>',table(['Average ms','p95 ms','p99 ms','Samples'],
+                    [[fmt(e[k]) for k in ['avg_ms','p95_ms','p99_ms','requests']]])])
+    html.extend(['<h2>Scenarios</h2>', table(headers,[row(name,g) for name,g in result['scenarios'].items()]),
+                 '<h2>Generators</h2>', table(headers,[row(name,g['statistics']) for name,g in result['agents'].items()])])
+    if result['cpu']:
+        html.extend(['<h2>CPU and memory</h2>',table(['Pod','Median CPU (m)','Peak sampled memory (MiB)'],
+                    [[pod_label(pod),fmt(g['median_m']),fmt(g['peak_memory_mib'])] for pod,g in result['cpu'].items()])])
+        for title, is_generator in [('PAZ CPU',False),('Generator CPU',True)]:
+            lines=[(pod_label(p),[(t-origin,c) for t,c,_ in pts]) for p,pts in sorted(pods.items())
+                   if ('-loadtest-' in p) == is_generator]
+            if lines:
+                html.append(chart(title,lines,'millicores'))
+    # Consolidate absent optional instrumentation. Preserve real discrepancies.
+    absent, warnings = set(), []
+    for note in result['limitations']:
+        if 'structured k6 summary unavailable' in note:
+            absent.add('structured k6 summaries (including dropped-iteration totals)')
+        elif 'execution exit code unavailable' in note:
+            absent.add('execution exit codes')
+        elif 'full-call elapsed coverage incomplete' in note and overall['elapsed'] is None:
+            absent.add('full-call elapsed time')
+        else:
+            warnings.append(note)
+    if not show_errors:
+        absent.add('separate integration-error counts')
+    notes = ['Whole run, including ramp. HTTP latency excludes connection setup. Expected outcomes reflect the workload script’s checks. CPU is the median across samples during observed traffic; memory is the sampled peak.']
+    if absent:
+        notes.append('Not recorded in this run; omitted: ' + '; '.join(sorted(absent)) + '.')
+    codes = [g['exit_code'] for g in result['agents'].values() if g['exit_code'] is not None]
+    if codes:
+        notes.append(f'Execution records: {len(codes)} of {len(result["agents"])} generators; nonzero exit codes: {sum(c != 0 for c in codes)}.')
+    html.extend(['<div class="notes"><b>Notes</b><ul>' + ''.join('<li>'+escape(n)+'</li>' for n in notes)+'</ul></div>'])
+    if warnings:
+        html.append('<h2>Collection limitations</h2><ul>'+''.join('<li>'+escape(n)+'</li>' for n in warnings)+'</ul>')
     return '\n'.join(html)
 
 
 def generate(run):
     result, buckets, pods = analyze(Path(run))
-    (Path(run) / 'report.html').write_text(render(result, buckets, pods), encoding='utf-8')
+    html = render(result, buckets, pods)
+    (Path(run) / 'report.html').write_text(html, encoding='utf-8')
     (Path(run) / 'summary.json').write_text(json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
+    # The published copy lives in reports/; keep it in step with the run directory.
+    REPORTS.mkdir(exist_ok=True)
+    (REPORTS / f'{result["run_id"]}.html').write_text(html, encoding='utf-8')
     return result
 
 
@@ -334,7 +381,7 @@ def main():
         generate(run)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         parser.exit(1, f'Cannot generate report: {exc}\n')
-    print(f'Written: {run / "report.html"} and {run / "summary.json"}')
+    print(f'Written: {run / "report.html"}, {run / "summary.json"}, reports/{run.name}.html')
 
 
 if __name__ == '__main__':

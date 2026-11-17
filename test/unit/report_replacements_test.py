@@ -19,6 +19,7 @@ class ReplacementTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         report.RESULTS = Path(self.tmp.name) / 'results'
+        report.REPORTS = Path(self.tmp.name) / 'reports'
         self.run = report.RESULTS / 'run-1'
         self.run.mkdir(parents=True)
         self.meta = {'RATE': '200', 'AGENTS': '2', 'DURATION': '1s', 'WARMUP': '30s',
