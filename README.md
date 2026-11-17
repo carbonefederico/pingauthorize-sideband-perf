@@ -483,16 +483,3 @@ headroom against the limit.
 The namespace is retained so credentials and the signing key survive between
 campaigns; delete it explicitly (`kubectl delete namespace paz-perf`) only
 when nothing in it is needed anymore.
-
-## Design history note
-
-The original design (pre-campaign; recorded in the repo's git history)
-shipped the `.deploymentpackage` as a file inside the server profile —
-chosen for determinism in a measurement rig. Before any load ran, the
-decision was revisited: a profile-carried policy artifact means every policy
-change restarts the containers, which is the documented anti-pattern for
-PAZ policy lifecycle (policy changes belong to the Deployment Manager
-package-store flow; profiles are for server configuration). The stack
-therefore consumes policy through a real S3 deployment-package store with a
-non-zero poll interval — the production consumption model — while git
-continues to carry only server configuration.
