@@ -45,13 +45,15 @@ reuses their working machinery instead of inventing new:
 ## Goals
 
 - Characterize the PAZ Sideband API decision path in deployment-package
-  (embedded PDP) mode at reference levels of **100, 250, and 500
+  (embedded PDP) mode at reference levels of **500, 1000, 1500, and 2000
   decisions/second**, each measured over a five-minute steady window with a
-  30-second warmup, three ascending rounds (100 → 250 → 500, repeated three
-  times), reporting the median run of the three selected by measured p95.
-- Report, per reference level: end-to-end sideband call latency (p50, p90,
-  p95, p99, max) measured client-side by k6; achieved rate versus target rate;
-  success rate; and PAZ pod CPU and memory during the window.
+  30-second warmup, three ascending rounds (500 → 1000 → 1500 → 2000,
+  repeated three times), reporting the median run of the three selected by
+  measured p95.
+- Report, per reference level: end-to-end sideband call latency (avg,
+  median, p90, p95, p99) pooled over the measured window and measured
+  client-side by k6; achieved rate versus target rate;
+  success rate; and steady-state PAZ pod and agent CPU during the window.
 - Capture **server-side ground truth** from PAZ's Gateway Timing and Gateway
   Request Type Timing monitor providers (`cn=Monitor` over LDAP) so
   client-side latency can be split into transport versus PAZ processing time.
@@ -229,20 +231,23 @@ PAZ cert, which k6 does not need).
 
 ### The measured workload
 
-One measured operation: a **portfolio read** through the policy ladder. Each
+The measured traffic is a **weighted mix over the policy ladder's four
+paths** (60% read permits, 15% MCP session methods, 15% HITL order
+approvals, 10% expected denials), not a single operation. Each
 k6 iteration builds the sideband envelope exactly as the sibling's adapter
 does — `source_ip`, `source_port`, `method: POST`,
 `url: https://<mcp-host>/mcp/portfolio`, bare `http_version`, headers as an
 array of single-key objects including
 `Authorization: Bearer <fresh token>`, and `body` as a JSON-RPC string — and
 POSTs it to `https://<paz-service>/sideband/request` with the `PDG-TOKEN`
-header. A 200 response without an embedded `response` object is a permit and
-counts as success.
+header. A 200 response without an embedded `response` object is a permit;
+the deny scenarios require the opposite verdict, so a permit there is a
+policy failure.
 
 - **Tokens are self-signed RS256 by k6** (WebCrypto, key from
   `keys/subject-signing.key`, kid `perf-subject-key`) and validated by PAZ
   against the in-cluster JWKS server. This is PF's model, transplanted: the
-  token issuer is on the measured path only as an HTTPS/LAN JWKS fetch PAZ
+  token issuer is on the measured path only as an HTTP/LAN JWKS fetch PAZ
   caches, and no external key service adds variance.
 - **Claims follow the sibling's permit fixture**:
   `sub_type: "vip_user"`, `client_id: "customer_support_agent"`,
@@ -255,10 +260,13 @@ counts as success.
   pins the literal value, the fallback is a fixed `sub` with fresh `jti` per
   iteration (PAZ keeps no per-subject state on this path, so rotation is a
   replay-prevention nicety, not a load-model requirement).
-- **Body**: a JSON-RPC `tools/call` request for the read tool
-  (`get_portfolio`) with a small realistic arguments object. The high-band
-  approval path (the `tctx` six-field mirror) is not measured in this
-  campaign.
+- **Bodies**: JSON-RPC requests whose shape selects the policy path —
+  `tools/call` reads (`get_portfolio_summary`), top-level session methods
+  (`tools/list`), and `tools/call` order submissions
+  (`submit_trade_order`, with the `tctx` six-field mirror carried in the
+  HITL approval token). The deny scenarios rotate four negative fixtures:
+  an undeclared acting agent, a token without `act.sub`, an oversized
+  order, and a wrong-audience token.
 
 ### Load model and protocol (PF's, verbatim)
 
@@ -269,12 +277,12 @@ counts as success.
 - Thresholds applied to the measured scenario only: p95 < 500 ms, success
   ≥ 99%, `http_req_failed` < 1%, and `dropped_iterations == 0` (a dropped
   iteration means the generator shed load — the run is invalid, not "fast").
-- Campaign protocol: three ascending rounds of 100 → 250 → 500; the reference
-  table reports the median run of the three by measured p95; one throwaway
-  sanity run warms a fresh deployment before the first counted round;
-  gate-failing runs are rerun and both attempts recorded.
-- Profiles `stage-100.env`, `stage-250.env`, `stage-500.env` fully describe
-  their runs, exactly like PF's.
+- Campaign protocol: three ascending rounds of 500 → 1000 → 1500 → 2000; the
+  reference table reports the median run of the three by measured p95; one
+  throwaway sanity run warms a fresh deployment before the first counted
+  round; gate-failing runs are rerun and both attempts recorded.
+- Profiles `stage-500.env`, `stage-1000.env`, `stage-1500.env`,
+  `stage-2000.env` fully describe their runs, exactly like PF's.
 
 ### Measurement and evidence
 
@@ -319,9 +327,11 @@ server-profiles/     pingauthorize/ (dsconfig layer: JWKS external server,
                      sibling's branch-import hook, unchanged). The
                      .deploymentpackage file ships under pingauthorize/.
 scripts/             deploy, verify, build-package (the one-time PAP API
-                     sequence), smoke, run-in-cluster, monitor, scrape-monitor
-                     (cn=Monitor), generate-report.py, uninstall.
-profiles/            stage-100/250/500.env + agents.env.
+                     sequence), generate-jwks, smoke, run-in-cluster,
+                     monitor, scrape-monitor (cn=Monitor),
+                     generate-report.py, analyze-run.py,
+                     analyze-timeline.py, validate, uninstall.
+profiles/            stage-500/1000/1500/2000.env + agents.env.
 keys/                Subject signing key (git-ignored); the public JWKS is
                      committed into the JWKS server release, as in PF.
 results/, reports/   Per-run artifacts; published HTML layer, as in PF.
