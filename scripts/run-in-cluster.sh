@@ -85,7 +85,7 @@ deadline=$((SECONDS + 1200))
 (
   while [[ ${SECONDS} -lt 1200 ]]; do
     top_line="$(kubectl -n "${NAMESPACE}" top pods \
-      -l 'app.kubernetes.io/instance=authorize-performance-test-loadtest,app.kubernetes.io/name=loadtest' \
+      -l 'app.kubernetes.io/instance=pingauthorize-sideband-perf-loadtest,app.kubernetes.io/name=loadtest' \
       --no-headers 2>/dev/null)" || true
     paz_line="$(kubectl -n "${NAMESPACE}" top pods \
       -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorize" \

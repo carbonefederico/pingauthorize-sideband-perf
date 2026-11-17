@@ -6,7 +6,7 @@
 # convention (helm forwards a dependency's values only under its alias key,
 # plus `global:` which is shared by convention). Release name = the project
 # folder name; the chart appends the product name, so fullnames read
-# authorize-performance-test-pingauthorize / -pingauthorizepap. PAZ boots
+# pingauthorize-sideband-perf-pingauthorize / -pingauthorizepap. PAZ boots
 # embedded-PDP polling the S3 package store (empty store at boot is a normal
 # production state — the poller picks the package up when published).
 global:
@@ -102,7 +102,7 @@ ping-devops:
     envs:
       SERVER_PROFILE_URL: ''
       SERVER_PROFILE_PATH: server-profiles/pingauthorizepap
-      PING_EXTERNAL_BASE_URL: authorize-performance-test-pap-pingauthorizepap.ping-devops.com:443
+      PING_EXTERNAL_BASE_URL: pingauthorize-sideband-perf-pap-pingauthorizepap.ping-devops.com:443
     workload:
       type: StatefulSet
       statefulSet:

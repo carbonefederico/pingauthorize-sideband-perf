@@ -45,7 +45,7 @@ affinity:
         labelSelector:
           matchLabels:
             app.kubernetes.io/name: loadtest
-            app.kubernetes.io/instance: authorize-performance-test-loadtest
+            app.kubernetes.io/instance: pingauthorize-sideband-perf-loadtest
     # Hard exclusion of the PAZ nodes: any node already running a pod whose
     # app.kubernetes.io/name is pingauthorize is out of bounds for agents.
     requiredDuringSchedulingIgnoredDuringExecution:

@@ -158,7 +158,7 @@ by hand inside the cluster. The namespace defaults to `paz-perf`.
    the committed defaults on first use; all its values ship with working
    lab defaults.
 2. Push this repository to GitHub (the Ping products clone their profile
-   from it at boot): `gh repo create carbonefederico/authorize-performance-test
+   from it at boot): `gh repo create carbonefederico/pingauthorize-sideband-perf
    --public --source . --push`.
 
 The deploy needs nothing else: `create-secrets.sh` (inside `deploy.sh`)
