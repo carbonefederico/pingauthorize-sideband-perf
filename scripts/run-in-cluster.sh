@@ -71,8 +71,36 @@ kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
 # the complete, flushed k6.json can be copied once per pod — no mid-run
 # snapshot race, no datapoint loss.
 echo "Waiting for load to finish (${agent_count} agents)..."
-declare -A collected
+# Plain indexed array, not an associative one: macOS ships bash 3.2, which
+# has no `declare -A`, and the collector died on that line right after the
+# pods went Ready (2026-11-16, stage-1500).
+collected=()
 deadline=$((SECONDS + 1200))
+
+# In-load resource sampler: kubectl top at 15s cadence for the whole loadtest
+# duration, into results/<run_id>/. Exists because stage-2000 failed with a
+# generator-side CPU starvation that could only be inferred post-run — the
+# five slow agents' pods were gone by the time we looked. This makes
+# starvation visible DURING the run (agent CPU pegged, PAZ idle).
+(
+  while [[ ${SECONDS} -lt 1200 ]]; do
+    top_line="$(kubectl -n "${NAMESPACE}" top pods \
+      -l 'app.kubernetes.io/instance=authorize-performance-test-loadtest,app.kubernetes.io/name=loadtest' \
+      --no-headers 2>/dev/null)" || true
+    paz_line="$(kubectl -n "${NAMESPACE}" top pods \
+      -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorize" \
+      --no-headers 2>/dev/null)" || true
+    {
+      echo "=== $(date -u +%H:%M:%S) ==="
+      echo "agents: ${top_line:-<none>}"
+      echo "paz:    ${paz_line:-<none>}"
+    } >> "${run_dir}/usage-during-run.txt"
+    sleep 15
+  done
+) &
+sampler_pid=$!
+trap 'kill "${sampler_pid}" 2>/dev/null || true' EXIT
+
 while [[ ${SECONDS} -lt ${deadline} ]]; do
   all_done=1
   for i in $(seq 0 $((agent_count - 1))); do

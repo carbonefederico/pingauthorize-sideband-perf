@@ -1,6 +1,11 @@
 .env
 keys/
+# results/ holds per-run artifacts (metric streams, agent logs, reports) —
+# large, local-only. The published result layer is reports/ (the per-run HTML
+# reports, tracked); evidence/ (per-run summary.json + env.json) is a local
+# cross-check, git-ignored like results/.
 results/
+evidence/
 node_modules/
 .DS_Store
 .superpowers/

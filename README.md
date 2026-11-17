@@ -59,14 +59,17 @@ than a permit-all stub.
 ## Scope of this campaign
 
 The campaign is a **baseline characterization** of the sideband decision path
-in deployment-package mode at fixed reference levels up to **500
+in deployment-package mode at fixed reference levels up to **2000
 decisions/second**. It shares the PF campaign's scope discipline, and the
 results support no conclusions about: the saturation point or maximum
 sustainable throughput (no level is run to failure — the cluster is shared
-with workloads this project does not own, so 500/s is the campaign bound);
-behavior above 500/s; overload, burst, failure, or recovery behavior;
-autoscaling (the PAZ topology is fixed at two pods); or a comparison against
-external-PDP mode (this campaign measures deployment-package mode only).
+with workloads this project does not own; 2000/s is the campaign bound,
+where PAZ sat at 1,486 m of its 4,000 m per-pod CPU limit (37%) with a
+still-smooth latency curve); behavior above 2000/s; overload, burst,
+failure, or recovery
+behavior; autoscaling (the PAZ topology is fixed at two pods); or a
+comparison against external-PDP mode (this campaign measures
+deployment-package mode only).
 
 ## Measurement protocol
 
@@ -74,9 +77,9 @@ The protocol follows the PF campaign's (`pingfederate-token-exchange-perf`),
 verbatim in its essentials:
 
 - Each reference level is run **three times per campaign**, in ascending
-  rounds (100 → 250 → 500, repeated three times). The reference table
-  reports the **median run** of the three, selected by measured p95, with the
-  per-run p95s quoted alongside it.
+  rounds (500 → 1000 → 1500 → 2000, repeated three times). The reference
+  table reports the **median run** of the three, selected by measured p95,
+  with the per-run p95s quoted alongside it.
 - A run counts only if it passes the generator-health gates: zero dropped
   iterations, achieved rate ≥ 98% of target, success rate ≥ 99%. A run that
   fails a gate is rerun and both attempts are recorded, never swapped or
@@ -84,16 +87,31 @@ verbatim in its essentials:
 - The first run after a fresh deployment is discarded: one throwaway sanity
   run warms the PAZ pods before the campaign's first counted round.
 - Every latency column comes from the **same measured window** — all raw
-  datapoints of the measured scenario, pooled across all ten agents, warmup
-  excluded — recorded per run in `results/<run_id>/summary.json`
+  datapoints of the measured phase (the plateau of the ramped scenarios,
+  tagged `phase=measured` per request), pooled across all ten agents,
+  ramp excluded — recorded per run in `results/<run_id>/summary.json`
   (`pooled_latency`) and rendered in the per-run report.
-- Each run: 30 s warmup scenario (tagged, excluded from thresholds) followed
-  by a 5-minute measured window at constant arrival rate, ten parallel k6
-  agent pods each driving RATE/10.
+- Each run: ten parallel k6 agent pods, each driving RATE/10 through four
+  ramped-arrival scenarios (read/session/HITL/deny at the campaign's
+  weighted mix) that ramp 0→full rate over 30 s (tagged `phase=warmup`,
+  excluded from thresholds and from the measured window) and then hold for
+  5 minutes. The ramp replaces the constant-arrival step start, which
+  stalled PAZ at every 2026-11-16 stage-2000 attempt (see the VU-sizing
+  note under Step 2).
+- CPU columns come from the 15 s-cadence in-run sampler
+  (`usage-during-run.txt`, written by `run-in-cluster.sh`): per-pod
+  steady-state medians over the middle 60% of samples, for the PAZ pods
+  (against the 4-CPU limit) and the loadtest agents. A `scripts/monitor.sh`
+  pod-usage CSV, when one exists for the campaign, is preferred and used
+  instead.
 - Server-side ground truth: an end-of-run scrape of PAZ's `cn=Monitor` Gateway
-  Timing providers (best-effort — a scrape failure never invalidates a run)
-  and a 5-second-cadence pod/node CPU CSV from `scripts/monitor.sh` running
-  for the whole campaign.
+  Timing providers (best-effort — a scrape failure never invalidates a run).
+- **The k6 script and report tooling are frozen for the campaign.** Any
+  change to the load shape, thresholds, or parsers between counted runs
+  makes runs incomparable; tooling changes happen between campaigns, never
+  mid-ladder (the 2026-11-16 phase-tag bug — a scenario-level tag that
+  blinded the stream parser to every measured datapoint — is the cautionary
+  example).
 
 ## Repository layout
 
@@ -190,15 +208,46 @@ kubectl -n ${NAMESPACE} port-forward pod/${PAZ_RELEASE}-pingauthorize-0 18443:14
 
 # Terminal B — sanity run, then the ladder, three ascending rounds:
 PROFILE=agents ./scripts/run-in-cluster.sh    # discarded warm-up run
-PROFILE=stage-100 ./scripts/run-in-cluster.sh
-PROFILE=stage-250 ./scripts/run-in-cluster.sh
 PROFILE=stage-500 ./scripts/run-in-cluster.sh
+PROFILE=stage-1000 ./scripts/run-in-cluster.sh
+PROFILE=stage-1500 ./scripts/run-in-cluster.sh
+PROFILE=stage-2000 ./scripts/run-in-cluster.sh
 # ...repeat the ladder twice more (rounds 2 and 3)
 ```
 
-Never run a level above the 500/s bound. Each run saves per-agent k6 logs and
-metric streams, `env.json`, and the `cn=Monitor` scrape into
+Never run a level above the 2000/s bound. Each run saves per-agent k6 logs and
+metric streams, `env.json`, the in-run CPU sampler output, and the
+`cn=Monitor` scrape into
 `results/<run_id>/` and exits non-zero if a k6 threshold failed.
+
+#### VU sizing — why the extended levels needed tuning (2026-11-16)
+
+Getting the 1500/s and 2000/s levels green required tuning the per-scenario
+VU knobs (`PRE_ALLOCATED_VUS`, `MAX_VUS` in the stage profiles), and the
+failure modes were all in the load generator, not PAZ. The deciding
+evidence: at 2000/s the server delivered full rate with 100% checks and a
+clean median in every attempt, while the dropped-iterations gate tripped on
+artifacts that all traced to the warmup→measured transition. With
+`constant-arrival-rate` scenarios, the measured window opens at full rate in
+one step, and that burst of fresh TLS handshakes stalls PAZ at the boundary
+(8s on a warmed JVM; 22s on one restarted minutes earlier), which cascades
+into VU-pool exhaustion and shed iterations. Three concrete findings from
+the streams: pre-allocating 300 VUs per scenario made the transition
+stampede 15,000 VUs deep and collapsed PAZ outright (its liveness probes
+killed it — do NOT raise `PRE_ALLOCATED_VUS` toward `MAX_VUS`); a burst of
+5,000 stalled it 8s; and the same rate in steady state never stalled once
+load was flowing.
+
+The working configuration is now baked into the profiles and the k6 script:
+`MAX_VUS=300` at 200 it/s per agent (arrival-rate × a ~1.4s worst-case
+iteration needs that headroom; 240 shed ~200 iterations), small
+`PRE_ALLOCATED_VUS` (the transition burst must stay under what PAZ absorbs
+— 50 per scenario at 2000/s, below the 3,750 the 1500/s level absorbed
+cleanly), and `ramping-arrival-rate` measured scenarios that ramp 0→full
+over the warmup window so no step burst exists at all. With all three in
+place the 2000/s level passes with zero dropped iterations and a 40ms p95.
+A dropped-iteration count that grows with `MAX_VUS` rather than shrinking
+is the signature of the transition burst, not the VU cap.
 
 ### Step 3 — report
 
@@ -217,13 +266,13 @@ These assumptions define what the measured numbers mean. They are design
 decisions, not accidents — changing any of them changes what the benchmark
 measures.
 
-1. **Token validation is local and static.** Subject tokens are self-signed
-   RS256 by k6 (kid `perf-subject-key`) and validated by PAZ against a
-   trusted certificate shipped in the server profile — no JWKS fetch, no
-   cache, no rotation behavior on the measured path. The campaign therefore
-   measures a single static signing key with out-of-band distribution;
-   `kid`-based rotation pickup is out of scope (PAZ cannot pick up key
-   rotation without an HTTP JWKS source).
+1. **Token validation is JWKS-based, with one static signing key.** Subject
+   tokens are self-signed RS256 by k6 (kid `perf-subject-key`) and validated
+   by PAZ's JWKS validator, which fetches the public key from an in-cluster
+   JWKS endpoint (`https://paz-perf-subject` — issuer-publishes/
+   verifier-fetches, as in the PF campaign) and caches it. The fetch and
+   cache are on the measured path; key *rotation* is not exercised (the
+   campaign signs every token with the same static key).
 2. **No persistent-store work on the decision path.** PAZ runs standalone
    with an embedded store and ephemeral data; the measured decisions evaluate
    the in-process policy package and touch no user store. The S3 package
@@ -234,11 +283,14 @@ measures.
    code paths as a cold population.
 3. **The envelope is the production envelope.** The load generator builds the
    sideband request exactly as the sibling project's paz-extauthz-adapter
-   does (schema pinned by unit tests), and the body is a realistic JSON-RPC
-   `tools/call` for the portfolio read. The measured hop is the hop a gateway
-   integration adds: the sideband request plus PAZ's decision. No gateway,
-   adapter, or MCP backend is in the measured path — those would measure
-   additional components.
+   does (schema pinned by unit tests). The measured traffic is a weighted
+   policy mix — 60% reads, 15% MCP session methods (top-level jsonrpc),
+   15% HITL order approvals, 10% expected denials, per agent rate — so
+   every measured window exercises all four policy paths, not just the
+   cheapest one. The measured hop is the hop a gateway integration adds:
+   the sideband request plus PAZ's decision. No gateway, adapter, or MCP
+   backend is in the measured path — those would measure additional
+   components.
 4. **Policy constants are the sibling's.** The sideband endpoint's service
    (`AgentGateway`), the MCP audience constant
    (`https://agentgateway-stack-ag.ping-devops.com/mcp/portfolio`), and the
@@ -251,24 +303,45 @@ measures.
    overhead. No paired on/off runs.
 6. **The nodes are shared.** Co-tenant load during a run is visible in the
    report's node-CPU panel and is an uncontrolled environmental factor. The
-   campaign bound (500/s) exists because of this; reference levels are
-   measured as-is, never driven to failure.
+   campaign bound (2000/s) exists because of this; reference levels are
+   measured as-is, never driven to failure. The median-of-three protocol
+   exists to make residual co-tenant noise visible as run-to-run spread
+   rather than hiding it inside a single number.
 7. **Warm state.** Ladder stages run sequentially against the same
    deployment; all counted runs are continuously warmed (the pre-campaign
    sanity run plus each stage's 30 s warmup). Cold-start behavior is not
    characterized.
 
-## Reference results — campaign of <YYYY-MM-DD>
+## Reference results — campaign of 2026-11-17
 
-*(Fill this table in after the campaign: one row per reference level, median
-run of three by measured p95, with per-run p95s and run ids quoted, as in the
-PF project's README.)*
+Twelve counted runs, three ascending rounds of the 500 → 1000 → 1500 → 2000
+ladder, all twelve passing the generator-health gates (zero dropped
+iterations, 100% achieved rate, 100% decision success). Each row is the
+median run of its level's three, selected by measured p95; the per-run p95s
+in parentheses show run-to-run spread. The first counted run of the campaign
+was run id `20261117102611`; a pre-campaign sanity run was not needed — the
+PAZ pods had been up and serving full-rate traffic since November 13.
 
-| Stage | Target rate | Requests | avg | median | p90 | p95 | p99 |
-|---|---|---:|---:|---:|---:|---:|---:|
-| 100/s | | | | | | | |
-| 250/s | | | | | | | |
-| 500/s | | | | | | | |
+| Stage | Target rate | Requests | avg | median | p90 | p95 | p99 | PAZ CPU/pod | Agent CPU |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 500/s | 500/s | 150,001 | 1.85 ms | 1.66 ms | 2.29 ms | 2.87 ms | 6.22 ms | 318 m | 141 m |
+| 1000/s | 1000/s | 300,022 | 2.12 ms | 1.72 ms | 2.92 ms | 4.24 ms | 8.93 ms | 633 m | 270 m |
+| 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 991 m | 435 m |
+| 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,486 m | 620 m |
+
+Per-run p95s by level: 500/s — 2.78 / 2.87 / 3.26 ms (median run
+`20261117110514`); 1000/s — 4.24 / 4.18 / 5.26 ms (median run
+`20261117103702`); 1500/s — 8.25 / 8.51 / 13.47 ms (median run
+`20261117112114`); 2000/s — 26.25 / 19.49 / 27.83 ms (median run
+`20261117105622`). CPU medians are per PAZ pod (4-CPU limit) and per
+loadtest agent, steady-state middle-60% of the 15 s in-run sampler. The
+median run of the table row and the CPU medians quoted alongside it come
+from the same run id. The shape of the ladder: the median decision latency
+barely moves across the four levels (1.66 → 1.72 → 1.88 → 2.75 ms through
+4× the load), while the tail bends — p95 grows 9× and p99 8× — and PAZ CPU
+per pod scales almost exactly linearly with offered rate. That is the
+queueing signature of rising utilization, not saturation: at the campaign
+bound PAZ still held ~2.5 CPUs of headroom per pod.
 
 ## Configuration and safety notes
 

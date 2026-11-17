@@ -71,6 +71,16 @@ const sidebandUrl = __ENV.PAZ_SIDEBAND_URL;
 const sharedSecret = __ENV.SIDEBAND_SHARED_SECRET;
 const requestTimeout = __ENV.REQUEST_TIMEOUT || '30s';
 
+// Wall clock when this agent's run started, for the dynamic phase tag: ramp
+// traffic (first WARMUP seconds) is warmup, the plateau after it is the
+// measured window. Init context runs once per run, before any scenario.
+const REQUEST_START_MS = Date.now();
+const WARMUP_MS = (() => {
+  const m = String(__ENV.WARMUP || '30s').match(/^([\d.]+)(ms|s|m)?$/);
+  if (!m) return 30000;
+  return parseFloat(m[1]) * (m[2] === 'm' ? 60000 : m[2] === 'ms' ? 1 : 1000);
+})();
+
 // The MCP audience doubles as the envelope URL's origin: the policies gate
 // on this resource identifier, so the envelope must present it. k6's init
 // context has no URL global — derive the host by string surgery.
@@ -172,71 +182,91 @@ export const options = {
   insecureSkipTLSVerify: (__ENV.INSECURE_SKIP_TLS_VERIFY || 'false') === 'true',
   discardResponseBodies: false,
   scenarios: {
-    // Warmup: full-rate ramp that fills connection pools, lets the JVM
-    // JIT-compile hot paths, and — new in the JWKS model — gives PAZ its
-    // first JWK-set fetch before the measured window opens.
-    warmup: {
-      executor: 'constant-arrival-rate',
-      rate,
-      timeUnit: '1s',
-      duration: __ENV.WARMUP || '30s',
-      preAllocatedVUs,
-      maxVUs,
-      gracefulStop: '5s',
-      exec: 'warmupIteration',
-      tags: { phase: 'warmup' },
-      startTime: '0s',
-    },
+    // No separate warmup scenario: each measured scenario's ramp serves as
+    // its own warmup (see the ramping comment below). The former
+    // constant-rate warmup + step transition is what produced the 2026-11-16
+    // stage-2000 transition stalls.
     // Measured: the weighted mix. Four arrival-rate scenarios share the
     // agent's rate; each carries its own tags so the report attributes
     // latency and outcomes per policy path.
+    //
+    // Ramped start, not constant: a constant-arrival measured window opens
+    // at full rate in one step, so its first second's arrivals hit PAZ as
+    // one wave of fresh handshakes. Every 2026-11-16 stage-2000 run stalled
+    // exactly at this boundary (8s on a days-old JVM, 22s on a minutes-old
+    // one, ~40 drops after the warmup rotation spread path warmth) while
+    // the same rate in steady state never stalled once load was flowing;
+    // 1500/s absorbed its smaller burst. The ramp below (WARMUP long,
+    // reaching full rate exactly when the measured window opens) spreads
+    // connection establishment across the ramp, so offered load never
+    // exceeds the steady-state rate the plateau then holds.
+    //
+    // The phase tag is set per request inside decide() (ramp = warmup,
+    // plateau = measured) from the run's wall clock, not statically on the
+    // scenario: a static tag applies to the WHOLE scenario including its
+    // plateau, which blinded the report's stream parser to every measured
+    // datapoint of the ramped runs (2026-11-16 run F). The boundary is the
+    // scenario start + WARMUP seconds; REQUEST_START_MS is set once at k6
+    // init. Only the plateau is the measured window.
     mix_read: {
-      executor: 'constant-arrival-rate',
-      rate: readRate,
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
       timeUnit: '1s',
-      duration: __ENV.DURATION || '5m',
+      stages: [
+        { target: readRate, duration: __ENV.WARMUP || '30s' },
+        { target: readRate, duration: __ENV.DURATION || '5m' },
+      ],
       preAllocatedVUs,
       maxVUs,
       gracefulStop: '30s',
-      startTime: __ENV.WARMUP || '30s',
+      startTime: '0s',
       exec: 'readIteration',
-      tags: { phase: 'measured', policy_path: 'read_permit' },
+      tags: { policy_path: 'read_permit' },
     },
     mix_session: {
-      executor: 'constant-arrival-rate',
-      rate: sessionRate,
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
       timeUnit: '1s',
-      duration: __ENV.DURATION || '5m',
+      stages: [
+        { target: sessionRate, duration: __ENV.WARMUP || '30s' },
+        { target: sessionRate, duration: __ENV.DURATION || '5m' },
+      ],
       preAllocatedVUs,
       maxVUs,
       gracefulStop: '30s',
-      startTime: __ENV.WARMUP || '30s',
+      startTime: '0s',
       exec: 'sessionIteration',
-      tags: { phase: 'measured', policy_path: 'session_permit' },
+      tags: { policy_path: 'session_permit' },
     },
     mix_hitl: {
-      executor: 'constant-arrival-rate',
-      rate: hitlRate,
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
       timeUnit: '1s',
-      duration: __ENV.DURATION || '5m',
+      stages: [
+        { target: hitlRate, duration: __ENV.WARMUP || '30s' },
+        { target: hitlRate, duration: __ENV.DURATION || '5m' },
+      ],
       preAllocatedVUs,
       maxVUs,
       gracefulStop: '30s',
-      startTime: __ENV.WARMUP || '30s',
+      startTime: '0s',
       exec: 'hitlIteration',
-      tags: { phase: 'measured', policy_path: 'order_hitl_permit' },
+      tags: { policy_path: 'order_hitl_permit' },
     },
     mix_deny: {
-      executor: 'constant-arrival-rate',
-      rate: denyRate,
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
       timeUnit: '1s',
-      duration: __ENV.DURATION || '5m',
+      stages: [
+        { target: denyRate, duration: __ENV.WARMUP || '30s' },
+        { target: denyRate, duration: __ENV.DURATION || '5m' },
+      ],
       preAllocatedVUs,
       maxVUs,
       gracefulStop: '30s',
-      startTime: __ENV.WARMUP || '30s',
+      startTime: '0s',
       exec: 'denyIteration',
-      tags: { phase: 'measured', policy_path: 'expected_deny' },
+      tags: { policy_path: 'expected_deny' },
     },
   },
   thresholds: {
@@ -266,10 +296,25 @@ export const options = {
   },
 };
 
-// Warmup iterations run the read path — they warm connections, JIT and the
-// JWKS cache — with phase=warmup tags so the report can exclude them.
+// The ramped scenarios serve as their own warmup (see the scenario comments),
+// so warmupIteration below is dead code kept only for reference — no scenario
+// references it anymore. The four-path rotation it implements lives on in
+// spirit: the ramp itself exercises all four paths at increasing rate.
 export async function warmupIteration() {
-  await doRead(__VU, __ITER);
+  switch (__ITER % 4) {
+    case 0:
+      await doRead(__VU, __ITER);
+      break;
+    case 1:
+      await sessionIteration();
+      break;
+    case 2:
+      await hitlIteration();
+      break;
+    default:
+      await denyIteration();
+      break;
+  }
 }
 
 export async function readIteration() {
@@ -404,12 +449,17 @@ async function decide({ scenario, token, body, expectPermit }) {
     httpVersion: '1.1',
   });
 
+  // Dynamic phase tag: the ramped scenarios run ramp (warmup) and plateau
+  // (measured) inside ONE scenario, so the phase must be decided per
+  // request from the run clock — a static scenario tag labels the plateau
+  // warmup too and blinds the report's measured-window parser.
+  const phase = Date.now() - REQUEST_START_MS < WARMUP_MS ? 'warmup' : 'measured';
   const params = {
     headers: {
       'Content-Type': 'application/json',
       'PDG-TOKEN': sharedSecret,
     },
-    tags: { name: 'POST /sideband/request' },
+    tags: { name: 'POST /sideband/request', phase },
     timeout: requestTimeout,
   };
 

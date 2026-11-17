@@ -11,15 +11,24 @@ runId: "manual"
 # scripts/run-in-cluster.sh (AGENTS in the selected profile).
 agentCount: 1
 
-# k6 agents request 100m: this cluster is shared and tightly packed (the PF
-# campaign's values file documents per-node headroom of ~0.1-0.7 CPU), so a
-# 1 CPU request leaves agent pods Pending. Observed agent usage in the PF
-# campaign: ~180m at 50 it/s, ~550m at 150 it/s with RS256 signing. The
-# burstable QoS lets them use what they need; the monitor CSV records agent
-# CPU so starvation is verifiable post-run.
+# k6 agents request 500m: the generator must be provisioned for the rate it
+# is asked to produce. Measured in the PF campaign: ~180m at 50 it/s and
+# ~550m at 150 it/s per agent with RS256 signing — stage-2000's 200 it/s on a
+# 100m request left five of ten agents CPU-starved (2ms medians became 150ms,
+# ~200 dropped iterations per 10s) while PAZ itself served the other five at
+# full rate. A 1 CPU request left pods Pending on the packed PF cluster, so
+# 500m + preferred anti-affinity: agents spread across nodes when the
+# cluster allows, schedule anywhere when it does not.
+#
+# In stage-1500 (2026-11-16) the two agents sharing a node with a PAZ pod
+# produced most of the run's dropped iterations and its worst tail (agent-3:
+# 82 drops, p95 69ms vs 38-46ms elsewhere), so agents also avoid the PAZ
+# nodes. That term is required, not preferred: six nodes host the load and
+# only two run PAZ, so with 10 agents the preferred form can still pack an
+# agent onto a PAZ node.
 resources:
   requests:
-    cpu: "100m"
+    cpu: "500m"
     memory: 512Mi
   limits:
     cpu: "4"
@@ -27,4 +36,20 @@ resources:
 
 nodeSelector: {}
 tolerations: []
-affinity: {}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: loadtest
+            app.kubernetes.io/instance: authorize-performance-test-loadtest
+    # Hard exclusion of the PAZ nodes: any node already running a pod whose
+    # app.kubernetes.io/name is pingauthorize is out of bounds for agents.
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - topologyKey: kubernetes.io/hostname
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: pingauthorize

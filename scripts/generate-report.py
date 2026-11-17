@@ -36,10 +36,12 @@ def parse_k6_summary(path):
     out = {"agent": path.stem}
     patterns = {
         "reqs": r"http_reqs\.+: +(\d+) +([\d.]+)/s",
-        "success": r"sideband_decision_success\.: +([\d.]+)% +(\d+) out of (\d+)",
-        # k6 prints durations >= 1s with an "s" suffix ("1.19s"), < 1s as ms.
-        "latency": (r"sideband_decision_latency\.+: +avg=([\d.]+)(m?s) +min=([\d.]+)(m?s)"
-                    r" +med=([\d.]+)(m?s) +max=([\d.]+)(m?s) +p\(90\)=([\d.]+)(m?s) +p\(95\)=([\d.]+)(m?s)"),
+        "success": r"sideband_decision_success\.+: +([\d.]+)% +(\d+) out of (\d+)",
+        # k6 prints durations >= 1s with an "s" suffix ("1.19s"), < 1s as ms,
+        # and sub-ms values as microseconds ("973.43µs" — agent-5 of the
+        # 2026-11-16 stage-1500 run was silently dropped without µs support).
+        "latency": (r"sideband_decision_latency\.+: +avg=([\d.]+)(m?s|µs) +min=([\d.]+)(m?s|µs)"
+                    r" +med=([\d.]+)(m?s|µs) +max=([\d.]+)(m?s|µs) +p\(90\)=([\d.]+)(m?s|µs) +p\(95\)=([\d.]+)(m?s|µs)"),
         # per-agent dropped iterations (load shedding by the VU cap)
         "dropped": r"dropped_iterations\.+: +(\d+)",
         # the configured scenario rate, from the scenario description line
@@ -55,13 +57,15 @@ def parse_k6_summary(path):
             if key in ("warmup_cfg", "duration_cfg"):  # duration strings like "30s" / "5m0s"
                 out[key] = list(m.groups())
             elif key == "latency":
-                # interleave value/unit groups; normalize s to ms
+                # interleave value/unit groups; normalize s and µs to ms
                 vals = []
                 g = m.groups()
                 for i in range(0, len(g), 2):
                     n = float(g[i])
                     if g[i + 1] == "s":
                         n *= 1000.0
+                    elif g[i + 1] == "µs":
+                        n /= 1000.0
                     vals.append(n)
                 out[key] = vals
             else:
@@ -218,6 +222,42 @@ def pooled_subtiming_means(series):
                 d.setdefault(sec, []).append(ms)
     return {name: [(sec, sum(v) / len(v)) for sec, v in sorted(d.items())]
             for name, d in pooled.items()}
+
+
+def parse_usage_sampler(path, date_utc="1970-01-01"):
+    """Parse run-in-cluster.sh's usage-during-run.txt (the in-run kubectl top
+    sampler) into the same shape parse_usage_csv returns, so summary CPU
+    stats work for runs made without scripts/monitor.sh running. Format:
+    '=== HH:MM:SS ===' headers (UTC wall clock of the run day), then
+    'agents:'/'paz:' lines of 'podname  <cpu>m  <mem>Mi'. The caller passes
+    the run's date (from env.json's timestamp) so timestamps land in the
+    same absolute frame as the k6 streams — the report charts subtract the
+    stream t0, and a 1970 frame would put the samples 56 years away from
+    it. Returns {name: [(ts, cpu_m, mem_or_pct, kind), ...]}."""
+    series = {}
+    ts = None
+    for line in open(path, errors="replace"):
+        line = line.strip()
+        if line.startswith("==="):
+            hh, mm, ss = (line.strip("= ").split(":") + ["0", "0"])[:3]
+            ts = f"{date_utc}T{int(hh):02d}:{int(mm):02d}:{int(ss):02d}Z"
+            continue
+        # The sampler prefixes each section's first pod line with
+        # 'agents:'/'paz:' — strip the label, the pod data follows it on
+        # the same line. Blank placeholder lines ('agents: <none>') have no
+        # millisecond field and fall through the CPU check below.
+        line = re.sub(r"^(agents:|paz:)\s*", "", line)
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2 or not parts[1].endswith("m"):
+            continue
+        try:
+            cpu_m = int(parts[1].rstrip("m"))
+        except ValueError:
+            continue
+        series.setdefault(parts[0], []).append((ts, cpu_m, 0, "pod"))
+    return series
 
 
 def parse_usage_csv(path):
@@ -492,6 +532,20 @@ def main():
     usage = parse_usage_csv(usage_files[-1]) if usage_files else {}
     paz_series = {p: s for p, s in usage.items() if "pingauthorize" in p and "pap" not in p and s[0][3] == "pod"}
     node_series = {p: s for p, s in usage.items() if s[0][3] == "node"}
+    # Loadtest agent pods from the same CSV (the in-run sampler in
+    # run-in-cluster.sh writes usage-during-run.txt; monitor.sh writes the
+    # pod-usage CSV — parse whichever exists).
+    agent_series = {p: s for p, s in usage.items() if "loadtest" in p and s[0][3] == "pod"}
+    if not agent_series and (run_dir / "usage-during-run.txt").is_file():
+        # No monitor CSV: fall back to the in-run sampler for both the
+        # agent pods and the PAZ pods (the sampler records both). The run's
+        # UTC date comes from env.json so sampler timestamps share the k6
+        # streams' absolute frame.
+        run_date = (env_meta.get("timestamp_utc") or "1970-01-01T00:00:00Z")[:10]
+        sampled = parse_usage_sampler(run_dir / "usage-during-run.txt", run_date)
+        agent_series = {p: s for p, s in sampled.items() if "loadtest" in p}
+        paz_series = {p: s for p, s in sampled.items()
+                      if "pingauthorize" in p and "pap" not in p}
     # A report without PAZ pod CPU is not a complete report — this campaign's
     # numbers only mean something next to the platform load that produced
     # them (and a silently-absent panel reads as data, not absence). Warn
@@ -880,6 +934,32 @@ def main():
     # Commit-friendly per-run summary (raw streams stay out of git; this
     # JSON makes the evidence behind any report claim version-controlled).
     lat_stats = pooled_latency_stats(series) if series else None
+
+    # CPU columns for the README table: steady-state medians per PAZ pod and
+    # per loadtest agent, from the monitor CSV or the in-run sampler
+    # (whichever exists). "Steady state" = the middle 60% of each pod's CPU
+    # samples, discarding ramp and teardown edges; the median over that
+    # window is the number the campaign tables quote. Per-pod medians are
+    # then pooled: PAZ = mean of pod medians (pods are symmetric by
+    # anti-affinity design), agents likewise.
+    def steady_median_m(pts):
+        vals = sorted(cpu_m for _, cpu_m, _, _ in pts)
+        if not vals:
+            return None
+        lo, hi = int(len(vals) * 0.2), int(len(vals) * 0.8)
+        return (vals[lo:hi] and sum(vals[lo:hi]) / len(vals[lo:hi])) or None
+
+    paz_cpu = [m for m in (steady_median_m(p) for p in paz_series.values()) if m]
+    agent_cpu = [m for m in (steady_median_m(p) for p in agent_series.values()) if m]
+    cpu_stats = {
+        # Millicores, steady-state median; the 4-CPU PAZ limit and 500m
+        # agent request are the reference points in the README table.
+        "paz_pod_median_m": round(sum(paz_cpu) / len(paz_cpu)) if paz_cpu else None,
+        "paz_pods": len(paz_cpu),
+        "agent_median_m": round(sum(agent_cpu) / len(agent_cpu)) if agent_cpu else None,
+        "agents": len(agent_cpu),
+    }
+
     summary = {
         "run_id": sys.argv[1],
         "profile": env_meta.get("profile"),
@@ -905,6 +985,9 @@ def main():
             "max_ms": round(lat_stats["max_ms"], 2),
             "requests": lat_stats["requests"],
         } if lat_stats else None,
+        # Steady-state CPU medians (see cpu_stats above) — the README
+        # table's CPU columns. None when no usage data was captured.
+        "cpu": cpu_stats,
         "agents": [
             {
                 "agent": s["agent"],
