@@ -13,6 +13,9 @@ global:
   envs:
     PING_IDENTITY_ACCEPT_EULA: 'YES'
   image:
+    # Pin 2607: 2608 breaks standalone-profile bootstrap (documented in the
+    # sibling project's values file). Changing the pin redoes the version-
+    # specific verifications in server-profiles/README.md.
     tag: '2607'
   # The chart 0.15.0 privateCert pre-install hook is broken (invalid YAML
   # separator) and aborts fresh installs. scripts/create-secrets.sh creates

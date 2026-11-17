@@ -15,9 +15,7 @@ immutable bundle and loaded into the PAZ process itself. This is the
 production integration model, and it differs from the sibling project
 `ai-mcp-gateways-paz-integrations`, whose PAZ resolved policies through PAP
 on every decision (external PDP mode). In this stack PAP exists only to build
-the package once and sits off the decision path entirely. The full design —
-including goals, non-goals, and the campaign protocol — is
-[the spec](docs/superpowers/specs/2026-11-10-paz-sideband-perf-design.md).
+the package once and sits off the decision path entirely.
 
 ## Architecture
 
@@ -435,7 +433,7 @@ when nothing in it is needed anymore.
 
 ## Design history note
 
-The original design (docs/superpowers/specs/2026-11-10-paz-sideband-perf-design.md)
+The original design (pre-campaign; recorded in the repo's git history)
 shipped the `.deploymentpackage` as a file inside the server profile —
 chosen for determinism in a measurement rig. Before any load ran, the
 decision was revisited: a profile-carried policy artifact means every policy
@@ -444,5 +442,4 @@ PAZ policy lifecycle (policy changes belong to the Deployment Manager
 package-store flow; profiles are for server configuration). The stack
 therefore consumes policy through a real S3 deployment-package store with a
 non-zero poll interval — the production consumption model — while git
-continues to carry only server configuration. The spec predates this
-decision; this README is authoritative.
+continues to carry only server configuration.
