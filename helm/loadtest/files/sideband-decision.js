@@ -421,19 +421,26 @@ export async function hitlIteration() {
 // Expected denials rotate through the ladder's negative fixtures: an
 // undeclared acting agent (R2), a token without act.sub (R2 vacuous), an
 // oversized order (Deny Oversized), and a wrong-audience token (R1). Each
-// MUST come back denied — a permit is a policy failure.
+// MUST come back denied with its EXPECTED embedded status (third review,
+// finding 4): "any denial" would let a fixture pass for the wrong reason —
+// e.g. an authentication failure denying before the authorization rule
+// under test ever ran. Each fixture names the embedded response_code its
+// rule produces; a valid-but-unexpected denial fails the correctness check.
 export async function denyIteration() {
   const which = (__VU + __ITER) % 4;
   let token;
   let body;
+  let expectedDenialCode;
   switch (which) {
     case 0: // undeclared acting agent -> R2 denies
       token = await buildSubjectToken(__VU, __ITER, { act: { sub: 'marketing_agent' } });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
+      expectedDenialCode = 403;
       break;
     case 1: // no act.sub at all -> R2 denies (agent identity mismatch)
       token = await buildSubjectToken(__VU, __ITER, { act: undefined });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
+      expectedDenialCode = 403;
       break;
     case 2: // oversized order (50k > 20k threshold) -> Deny Oversized
       token = await buildSubjectToken(__VU, __ITER, {
@@ -449,15 +456,17 @@ export async function denyIteration() {
         },
       });
       body = rpcBody(__VU, __ITER, 'submit_trade_order').replace('"amount":3000', '"amount":50000').replace('"quantity":3', '"quantity":100');
+      expectedDenialCode = 403;
       break;
     default: // wrong audience (gateway root, not the MCP resource) -> R1 denies
       token = await buildSubjectToken(__VU, __ITER, {
         aud: mcpAud.replace(/\/mcp\/portfolio$/, ''),
       });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
+      expectedDenialCode = 401;
       break;
   }
-  await decide({ scenario: 'mix_deny', token, body, expectPermit: false });
+  await decide({ scenario: 'mix_deny', token, body, expectPermit: false, expectedDenialCode });
 }
 
 export default async function () {
@@ -469,7 +478,7 @@ async function doRead(vu, iter) {
   await decide({ scenario: 'mix_read', token, body: rpcBody(vu, iter), expectPermit: true });
 }
 
-async function decide({ scenario, token, body, expectPermit }) {
+async function decide({ scenario, token, body, expectPermit, expectedDenialCode }) {
   const envelope = buildSidebandEnvelope({
     method: 'POST',
     url: envelopeUrl,
@@ -524,9 +533,17 @@ async function decide({ scenario, token, body, expectPermit }) {
   // success — an error in the deny scenario is not a successful expected
   // denial, it is a generator/SUT fault.
   const verdictKind = classify(response.status, payload);
+  // Expected verdict: permits require a permit; denials require a deny WITH
+  // the fixture's expected embedded code (third review, finding 4) — a
+  // valid-but-wrong denial (right shape, wrong rule) fails the check. An
+  // error is never an expected outcome in either direction.
+  const expectedDenial =
+    verdictKind === 'deny' &&
+    (expectedDenialCode === undefined ||
+      (payload && payload.response && payload.response.response_code === expectedDenialCode));
   const expected = verdictKind === 'error'
     ? false
-    : (expectPermit ? verdictKind === 'permit' : verdictKind === 'deny');
+    : (expectPermit ? verdictKind === 'permit' : expectedDenial);
   // The check carries the same phase tag as every metric here — one
   // tagging rule for everything decide() emits (follow-up review,
   // additional issue: checks were previously untagged).

@@ -3,8 +3,14 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 require_command kubectl
 
+# Output lands in results/pod-usage-<UTC stamp>.csv, and the newest path is
+# mirrored to results/LATEST_MONITOR_CSV so the runner can record the exact
+# monitoring source in the run's env.json (third review, finding 5) — the
+# report must associate CPU data with its run explicitly, not pick whichever
+# global CSV is newest.
 mkdir -p "${ROOT_DIR}/results"
 output="${ROOT_DIR}/results/pod-usage-$(date -u +%Y%m%dT%H%M%SZ).csv"
+printf '%s' "${output}" > "${ROOT_DIR}/results/LATEST_MONITOR_CSV"
 echo "timestamp,kind,name,cpu,memory_or_pct" > "${output}"
 echo "Writing ${output}; press Ctrl-C to stop."
 

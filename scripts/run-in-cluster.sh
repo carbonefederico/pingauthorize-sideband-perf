@@ -139,6 +139,15 @@ kubectl -n "${NAMESPACE}" wait --for=condition=complete "job/${job_name}" --time
 # and the old code exited before capturing agent logs and the monitor
 # scrape. The Job's success/failure verdict is taken after capture.
 succeeded="$(kubectl -n "${NAMESPACE}" get "job/${job_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo 0)"
+# Independently captured terminal evidence (third review, finding 2):
+# the report must not infer execution success from file presence, so the
+# runner records the Job's terminal state explicitly in env.json.
+if [[ "${succeeded}" == "${agent_count}" ]]; then
+  job_terminal_state="complete"
+else
+  failed_count="$(kubectl -n "${NAMESPACE}" get "job/${job_name}" -o jsonpath='{.status.failed}' 2>/dev/null || echo 0)"
+  job_terminal_state="failed (succeeded=${succeeded}, failed=${failed_count})"
+fi
 
 # Capture every agent's end-of-run summary + per-pod exit status, then the
 # best-effort cn=Monitor scrape (never fails the run — see scrape-monitor.sh).
@@ -162,9 +171,9 @@ for i in $(seq 0 $((agent_count - 1))); do
   exit_codes="${exit_codes}\"agent-${i}\":${code}"
 done
 exit_codes="${exit_codes}}"
-python3 - "$run_dir" "$exit_codes" <<'PYEOF'
+python3 - "$run_dir" "$exit_codes" "$job_terminal_state" <<'PYEOF'
 import json, sys
-run_dir, raw = sys.argv[1], sys.argv[2]
+run_dir, raw, job_state = sys.argv[1], sys.argv[2], sys.argv[3]
 path = f"{run_dir}/env.json"
 try:
     env = json.load(open(path))
@@ -174,6 +183,16 @@ try:
     env["agent_exit_codes"] = json.loads(raw)
 except json.JSONDecodeError:
     env["agent_exit_codes"] = {}
+env["job_terminal_state"] = job_state
+# Monitoring provenance (third review, finding 5): record the exact CSV the
+# running monitor.sh is writing, when one exists, so the report associates
+# CPU data with this run explicitly instead of picking the newest global
+# file. The in-run sampler (usage-during-run.txt) is written unconditionally
+# and remains the fallback.
+import os
+latest = f"{run_dir}/../LATEST_MONITOR_CSV"
+if os.path.exists(latest):
+    env["monitor_csv"] = os.path.realpath(latest.strip())
 json.dump(env, open(path, "w"), indent=2)
 PYEOF
 kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide > "${run_dir}/job.txt" 2>&1 || true

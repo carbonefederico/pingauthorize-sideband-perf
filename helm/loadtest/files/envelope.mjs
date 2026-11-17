@@ -65,12 +65,15 @@ export function classify(statusCode, parsedBody) {
     return "error"; // response without a response_code: not a well-formed denial
   }
   const code = r.response_code;
-  if (typeof code !== "number" || !Number.isFinite(code)) {
-    return "error"; // non-numeric response_code
-  }
-  // Embedded HTTP-error codes (5xx) are server faults, not denials.
-  if (code >= 500) {
+  // response_code must be an INTEGER (third review, finding 4: 499.5 is
+  // malformed, and -1/0/200/302 are not authorization denials). A denial is
+  // an HTTP 4xx verdict — anything else (2xx/3xx embedded "denials",
+  // negatives, zero) is not a well-formed denial verdict.
+  if (!Number.isInteger(code)) {
     return "error";
+  }
+  if (code < 400 || code >= 500) {
+    return "error"; // non-4xx embedded verdicts: server fault or malformed
   }
   return "deny";
 }

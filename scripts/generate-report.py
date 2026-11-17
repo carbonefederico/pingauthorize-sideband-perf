@@ -16,6 +16,7 @@ import gzip
 import io
 import json
 import math
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -33,7 +34,7 @@ THRESHOLD_P95_MS = 500.0
 def parse_k6_summary(path):
     """End-of-run summary metrics from one k6 agent log."""
     text = path.read_text(errors="replace")
-    out = {"agent": path.stem}
+    out = {"agent": path.stem, "_log_text": text}
     patterns = {
         "reqs": r"http_reqs\.+: +(\d+) +([\d.]+)/s",
         "success": r"sideband_decision_success\.+: +([\d.]+)% +(\d+) out of (\d+)",
@@ -90,6 +91,7 @@ def parse_k6_metrics_json(path):
     subtimings = {}  # metric -> [(ts, ms)] for connecting/tls_handshaking/waiting/sending/receiving
     warmup_points = 0
     phaseless_points = 0
+    bad_phase_points = 0  # present but not "measured"/"warmup" — format drift
     scenario_lat = {}  # scenario -> [(ts, ms)] measured-window per-request latency
     scenario_success = {}  # scenario -> [ok_count, total] from the success Rate
     scenario_errors = {}  # scenario -> error count from sideband_errors
@@ -109,22 +111,42 @@ def parse_k6_metrics_json(path):
             metric = ev.get("metric", "")
             data = ev.get("data", {})
             tags = data.get("tags", {})
-            # Measured-window extraction requires an EXPLICIT phase tag
-            # (2026-11-17 follow-up review, additional issue): a Point with
-            # no phase is ambiguous — counting it as measured would let
-            # untagged traffic into the measured window. Points without a
-            # phase are counted and reported as evidence of a format drift,
-            # not silently merged.
+            # Measured-window extraction accepts ONLY phase="measured"
+            # (third review, finding 3): the earlier filter excluded missing
+            # and "warmup" but accepted every other value, so "invalid" or
+            # misspelled phases counted as measured. For the current metrics
+            # set (duration, elapsed, success, errors), a missing or
+            # unrecognized phase is a format-drift evidence gap — counted,
+            # reported, never merged into the measured window. Subtiming
+            # points carry the phase only since the same fix; historical
+            # streams (no phase on subtimings) keep flowing through the
+            # warmup/None path but are flagged.
             phase = tags.get("phase")
             if metric in ("http_req_duration", "sideband_request_elapsed",
                           "sideband_decision_success", "sideband_errors"):
                 if phase is None:
                     phaseless_points += 1
                     continue
-            if phase == "warmup":
-                if metric in ("http_req_duration", "sideband_request_elapsed"):
-                    warmup_points += 1
-                continue
+                if phase == "warmup":
+                    if metric in ("http_req_duration", "sideband_request_elapsed"):
+                        warmup_points += 1
+                    continue
+                if phase != "measured":
+                    bad_phase_points += 1
+                    continue
+            elif metric in sub_metric_names:
+                if phase is None:
+                    # historical-format subtiming points (pre-phase-tagging)
+                    # — excluded from charts below via the phase counters
+                    # only when the whole stream is current-format; see
+                    # phaseless_points surfacing in the summary.
+                    phaseless_points += 1
+                    continue
+                if phase == "warmup":
+                    continue
+                if phase != "measured":
+                    bad_phase_points += 1
+                    continue
             scenario = tags.get("scenario", "")
             value = data.get("value", 0)
             t = data.get("time", "")
@@ -152,11 +174,17 @@ def parse_k6_metrics_json(path):
     durations.sort(key=lambda x: x[0])
     t0 = durations[0][0]
 
-    # Bucket per second: avg + p90 over the requests in that second.
+    # Bucket per second: avg + p90 over the requests in that second (per
+    # agent, relative to its own t0 — kept for the per-agent detail page).
+    # RAW timestamps are also preserved (raw_durations) so the page-1
+    # aggregate can bucket every request directly against one common
+    # origin — third review, finding 6: shifting pre-bucketed per-agent
+    # data by integer seconds loses fractional offsets.
     buckets = {}
     for ts, ms in durations:
         sec = int((ts - t0).total_seconds())
         buckets.setdefault(sec, []).append(ms)
+    raw_durations = list(durations)
     dur_avg, dur_p90, dur_p95 = [], [], []
     for sec in sorted(buckets):
         vals = sorted(buckets[sec])
@@ -193,6 +221,15 @@ def parse_k6_metrics_json(path):
         scen.setdefault(name, {})["success_ok"], scen[name]["success_total"] = ok, tot
     for name, errs in scenario_errors.items():
         scen.setdefault(name, {})["errors"] = errs
+    # Measured success-evidence completeness: the generator emits exactly one
+    # success point per decision request (one per iteration), so a complete
+    # agent stream carries success_total == requests per scenario. Mismatched
+    # or absent success evidence must invalidate the run (third review,
+    # finding 1) — aggregate log success is a cross-check, not a substitute.
+    success_evidence_complete = all(
+        sc.get("success_total") == sc.get("requests")
+        for sc in scen.values())
+    success_samples = sum(sc.get("success_total", 0) for sc in scen.values())
     return {
         "dur_avg_s": dur_avg,
         "dur_p90_s": dur_p90,
@@ -200,11 +237,15 @@ def parse_k6_metrics_json(path):
         "req_rate": req_rate,
         # Raw per-second values, for exact pooling across agents on page 1.
         "buckets_ms": buckets,
+        "raw_durations": raw_durations,
         "elapsed_buckets_ms": elapsed_buckets,
         "subtimings_raw": sub_raw,
         "subtimings": sub_raw,
         "scenarios": scen,
+        "success_evidence_complete": success_evidence_complete,
+        "success_samples": success_samples,
         "phaseless_points": phaseless_points,
+        "bad_phase_points": bad_phase_points,
         "total_requests": len(durations),
         "total_elapsed": len(elapsed),
         "warmup_points": warmup_points,
@@ -589,10 +630,24 @@ def main():
     # the global results/ glob is a legacy fallback and, when used, is
     # flagged in the summary (the review caught reports pulling whichever
     # CSV was newest regardless of run association).
-    usage_files = sorted((run_dir).glob("pod-usage-*.csv")) or sorted(RESULTS.glob("pod-usage-*.csv"))
-    usage_source = str(usage_files[-1]) if usage_files else None
-    usage_from_run_dir = bool(sorted(run_dir.glob("pod-usage-*.csv")))
-    usage = parse_usage_csv(usage_files[-1]) if usage_files else {}
+    # Monitoring provenance (third review, finding 5): CPU data must be
+    # explicitly associated with the run, never "whatever global CSV is
+    # newest". Priority: (1) env.json monitor_csv (the runner recorded the
+    # live monitor's path), (2) a run-local pod-usage CSV, (3) the in-run
+    # sampler. There is NO newest-global-CSV fallback — an unrelated newer
+    # CSV must not feed a run's CPU figures.
+    usage_source = None
+    usage_from_run_dir = False
+    usage = {}
+    env_monitor = env_meta.get("monitor_csv")
+    run_csvs = sorted(run_dir.glob("pod-usage-*.csv"))
+    if env_monitor and os.path.isfile(env_monitor):
+        usage_source = env_monitor
+        usage = parse_usage_csv(env_monitor)
+    elif run_csvs:
+        usage_source = str(run_csvs[-1])
+        usage_from_run_dir = True
+        usage = parse_usage_csv(run_csvs[-1])
     paz_series = {p: s for p, s in usage.items() if "pingauthorize" in p and "pap" not in p and s[0][3] == "pod"}
     node_series = {p: s for p, s in usage.items() if s[0][3] == "node"}
     # Loadtest agent pods from the same CSV (the in-run sampler in
@@ -640,15 +695,17 @@ def main():
         # datapoint across agents; every agent's buckets are shifted by its
         # own t0 offset against that origin.
         agg_t0 = min(s["t0"] for s in series.values())
+        origin = (datetime.fromisoformat(str(agg_t0).replace("Z", "+00:00"))
+                  if isinstance(agg_t0, str) else agg_t0)
+        # Bucket every raw request timestamp DIRECTLY against the common
+        # origin (third review, finding 6): bucket = floor((ts - origin)/1s).
+        # No shifting of pre-bucketed series — fractional-second offsets
+        # between agents are preserved exactly.
         pooled = {}  # sec since common origin -> list of raw latencies
         for s in series.values():
-            own0 = (datetime.fromisoformat(str(s["t0"]).replace("Z", "+00:00"))
-                    if isinstance(s["t0"], str) else s["t0"])
-            origin = (datetime.fromisoformat(str(agg_t0).replace("Z", "+00:00"))
-                      if isinstance(agg_t0, str) else agg_t0)
-            shift = int((own0 - origin).total_seconds())
-            for sec, vals in s["buckets_ms"].items():
-                pooled.setdefault(sec + shift, []).extend(vals)
+            for ts, ms in s.get("raw_durations", []):
+                sec = int((ts - origin).total_seconds())
+                pooled.setdefault(sec, []).extend([ms])
         secs = sorted(pooled)
         agg_rate = [(sec, len(pooled[sec])) for sec in secs]
         agg_avg = [(sec, sum(pooled[sec]) / len(pooled[sec])) for sec in secs]
@@ -815,19 +872,16 @@ def main():
         for extra in sorted((log_ids | stream_ids) - expected_ids):
             evidence_gaps.append(f"unexpected agent present: {extra}")
 
-    # k6 execution evidence: the runner writes per-agent exit codes into
-    # env.json (agent_exit_codes, follow-up review finding 2); a parsed log
-    # that says k6 exited nonzero, or a missing exit code for a collected
-    # agent, is a failure. Historical runs (pre-finding-2 runner) carry no
-    # per-agent codes, but their COLLECTION is itself evidence: run-in-
-    # cluster.sh exits nonzero before declaring "Results saved" unless the
-    # Job reached succeeded == AGENTS (every pod exits 0), so a run dir that
-    # exists with all agent streams counts as job-level success. The
-    # report records which evidence level it used.
+    # k6 execution evidence (third review, finding 2): per-agent exit codes
+    # in env.json (agent_exit_codes) are the primary source. The presence of
+    # summaries/streams is NOT success evidence — the runner creates the run
+    # dir and copies streams before any Job check. A log that explicitly
+    # reports a nonzero k6 exit fails the run regardless of any other
+    # evidence. Runs carrying neither per-agent codes nor a Job-level
+    # terminal verdict are UNKNOWN evidence -> INVALID.
     agent_exit_codes = env_meta.get("agent_exit_codes") or {}
     exit_evidence = "per-agent" if agent_exit_codes else (
-        "job-level (historical: runner verified succeeded==AGENTS before saving)"
-        if summaries else "none")
+        "job-level" if env_meta.get("job_terminal_state") else "unknown")
     if agent_exit_codes:
         for s in summaries:
             code = agent_exit_codes.get(s["agent"])
@@ -835,6 +889,29 @@ def main():
                 evidence_gaps.append(f"k6 exit status unknown: {s['agent']}")
             elif int(code) != 0:
                 gate_failures.append(f"k6 exited {code}: {s['agent']}")
+    else:
+        # Historical fallback requires INDEPENDENT terminal evidence: the
+        # runner records job_terminal_state=complete (with succeeded count)
+        # in env.json when the Job completed with all agents. Absent that,
+        # the log's own exit line is checked; a nonzero exit is POSITIVE
+        # evidence of failure (overrides the unknown-evidence gap -> FAIL),
+        # while a zero exit line is not independent evidence of success —
+        # evidence stays unknown -> INVALID.
+        job_state = env_meta.get("job_terminal_state")
+        log_nonzero_exit = False
+        for s in summaries:
+            m = re.search(r"k6 exited with code (\d+)", s.get("_log_text", ""))
+            if m and int(m.group(1)) != 0:
+                gate_failures.append(f"k6 exited {m.group(1)}: {s['agent']} (from log)")
+                log_nonzero_exit = True
+        if job_state == "complete":
+            pass  # independently captured terminal evidence of all-agent success
+        elif job_state is None and not log_nonzero_exit:
+            evidence_gaps.append(
+                "k6 execution evidence unknown: no per-agent exit codes and "
+                "no job_terminal_state recorded (historical run)")
+        elif job_state is not None and job_state != "complete":
+            gate_failures.append(f"job terminal state: {job_state}")
 
     # Per-scenario measured gates from the streams (follow-up review,
     # finding 5): pooled statistics hide a failing low-volume scenario, so
@@ -878,7 +955,18 @@ def main():
             continue
         if agg["p95_ms"] is not None and not (agg["p95_ms"] < p95_gate):
             gate_failures.append(f"scenario {name}: p95 {agg['p95_ms']} vs {p95_gate}")
-        if agg["success_pct"] is not None and not (agg["success_pct"] >= success_gate):
+        # Success evidence is REQUIRED per scenario (third review, finding
+        # 1): the generator emits exactly one success point per decision
+        # request, so a complete stream carries success_total == requests.
+        # Missing or mismatched success samples are an evidence gap (the
+        # aggregate log success cannot substitute for measured outcomes).
+        succ_total = sum(s.get("scenarios", {}).get(name, {}).get("success_total", 0)
+                         for s in series.values())
+        if succ_total != reqs:
+            evidence_gaps.append(
+                f"scenario {name}: success evidence incomplete "
+                f"({succ_total} success samples for {reqs} requests)")
+        elif agg["success_pct"] is not None and not (agg["success_pct"] >= success_gate):
             gate_failures.append(f"scenario {name}: success {agg['success_pct']:.2f}% vs {success_gate}")
         if errs != 0:
             gate_failures.append(f"scenario {name}: {errs} classified errors")

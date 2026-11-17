@@ -422,8 +422,9 @@ had been up and serving full-rate traffic since November 13.
 | 1500/s | 1500/s | 450,074 | 3.04 ms | 1.88 ms | 5.41 ms | 8.51 ms | 20.73 ms | 1,329 m | 494 m |
 | 2000/s | 2000/s | 600,063 | 6.64 ms | 2.75 ms | 15.9 ms | 26.25 ms | 51.84 ms | 1,890 m | 697 m |
 
-All twelve runs re-verified after the correction: verdict PASS on every
-run, achieved rate 100.0–100.02% (the few-hundredths over 100 are boundary
+After the first correction round every run re-verified as PASS under
+those rules, with achieved rate 100.0–100.02% (the few-hundredths over
+100 are boundary
 iterations completing after the window's last scheduled arrival), measured
 throughput 500.0–2000.2/s against the configured targets, zero dropped
 iterations, 100% decision success. Per-run p95s by level: 500/s — 2.78 /
@@ -432,11 +433,25 @@ ms (median run `20261117103702`); 1500/s — 8.25 / 8.51 / 13.47 ms (median
 run `20261117112114`); 2000/s — 26.25 / 19.49 / 27.83 ms (median run
 `20261117105622`).
 
+**Verdict status of the historical runs.** These twelve runs are
+**historical measurements with documented limitations**, not
+currently-validated results. Each run's report and summary carries the
+verdict `INVALID` under the final (post-third-review) evidence rules: the
+campaign's streams predate the success-point tagging, the per-agent exit
+codes, and the Job terminal-state record that the current rules require,
+and reprocessing cannot reconstruct evidence that was never captured. The
+figures above are the recovered measured quantities; what cannot be
+independently proven from the archive is (a) per-scenario success
+outcomes, (b) per-agent execution success, and (c) the token-validation
+cache behavior (see Benchmark assumption 2). A fresh campaign with the
+corrected instrumentation is required to produce validated results.
+
 Measurement definitions, precisely: the latency columns pool every
 raw datapoint of the measured phase (`phase=measured` per request) across
 all ten agents — the pool is per-agent steady-state pooling, not a
 simultaneous aggregate-load window (agents start within seconds of each
-other; the report charts bucket on a common absolute-time origin). The
+other; the report charts bucket every raw request timestamp directly
+against one common absolute-time origin). The
 headline latency is k6's `response.timings.duration` — sending + waiting +
 receiving, excluding connection establishment, which steady-state
 connection reuse amortizes to each VU's first iterations. The generator
