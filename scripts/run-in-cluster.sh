@@ -86,7 +86,7 @@ deadline=$((SECONDS + 1200))
 (
   while [[ ${SECONDS} -lt 1200 ]]; do
     top_line="$(kubectl -n "${NAMESPACE}" top pods \
-      -l 'app.kubernetes.io/instance=pingauthorize-sideband-perf-loadtest,app.kubernetes.io/name=loadtest' \
+      -l "job-name=${job_name}" \
       --no-headers 2>/dev/null)" || true
     paz_line="$(kubectl -n "${NAMESPACE}" top pods \
       -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorize" \
@@ -112,12 +112,14 @@ while [[ ${SECONDS} -lt ${deadline} ]]; do
       all_done=0
       continue
     fi
-    # The k6 summary block is only printed once the run finished.
-    if kubectl -n "${NAMESPACE}" logs "${pod}" -c k6 --request-timeout=10s 2>/dev/null \
-        | grep -q "checks_succeeded\|checks_failed"; then
-      kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6.json" \
-        "${run_dir}/agent-${i}-metrics.json" -c k6 >/dev/null 2>&1 \
-        && collected[$i]=yes || all_done=0
+    # The sentinel is written only after k6 has exited and closed its output.
+    if kubectl -n "${NAMESPACE}" exec "${pod}" -c k6 -- test -f /out/k6-exit-code 2>/dev/null; then
+      if kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6.json" "${run_dir}/agent-${i}-metrics.json" -c k6 >/dev/null 2>&1 \
+        && kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6-summary.json" "${run_dir}/agent-${i}-summary.json" -c k6 >/dev/null 2>&1; then
+        collected[$i]=yes
+      else
+        all_done=0
+      fi
     else
       all_done=0
     fi
@@ -125,9 +127,13 @@ while [[ ${SECONDS} -lt ${deadline} ]]; do
   [[ "${all_done}" -eq 1 ]] && break
   sleep 5
 done
-[[ "${collected[$((agent_count - 1))]:-}" == "yes" ]] || {
-  echo "WARNING: some agent result files were not collected (pod logs below)." >&2
-}
+collection_failed=0
+for i in $(seq 0 $((agent_count - 1))); do
+  if [[ "${collected[$i]:-}" != "yes" ]]; then
+    echo "WARNING: result collection incomplete for agent-${i}" >&2
+    collection_failed=1
+  fi
+done
 
 kubectl -n "${NAMESPACE}" logs -f "job/${job_name}" || true
 
@@ -172,7 +178,7 @@ for i in $(seq 0 $((agent_count - 1))); do
   exit_codes="${exit_codes}\"agent-${i}\":${code}"
 done
 exit_codes="${exit_codes}}"
-python3 - "$run_dir" "$exit_codes" "$job_terminal_state" <<'PYEOF'
+python3 - "$run_dir" "$exit_codes" "$job_terminal_state" "$collection_failed" <<'PYEOF'
 import json, sys
 run_dir, raw, job_state = sys.argv[1], sys.argv[2], sys.argv[3]
 path = f"{run_dir}/env.json"
@@ -185,21 +191,15 @@ try:
 except json.JSONDecodeError:
     env["agent_exit_codes"] = {}
 env["job_terminal_state"] = job_state
-# Monitoring provenance (third review, finding 5): record the exact CSV the
-# running monitor.sh is writing, when one exists, so the report associates
-# CPU data with this run explicitly instead of picking the newest global
-# file. The in-run sampler (usage-during-run.txt) is written unconditionally
-# and remains the fallback.
-import os
-latest = f"{run_dir}/../LATEST_MONITOR_CSV"
-if os.path.exists(latest):
-    env["monitor_csv"] = os.path.realpath(latest.strip())
+# The in-run sampler belongs to this exact run; avoid global pointer races.
+env["artifact_schema_version"] = 2
+env["collection_incomplete"] = bool(int(sys.argv[4]))
 json.dump(env, open(path, "w"), indent=2)
 PYEOF
 kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide > "${run_dir}/job.txt" 2>&1 || true
 "${ROOT_DIR}/scripts/scrape-monitor.sh" "${run_dir}" || true
 
-if [[ "${succeeded}" != "${agent_count}" ]]; then
+if [[ "${succeeded}" != "${agent_count}" || "${collection_failed}" != "0" ]]; then
   echo "k6 Job failed (a k6 script/check error or pod failure); evidence captured to ${run_dir}." >&2
   kubectl -n "${NAMESPACE}" get "job/${job_name}" -o wide >&2
   exit 1

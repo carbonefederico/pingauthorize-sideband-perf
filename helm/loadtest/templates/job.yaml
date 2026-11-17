@@ -35,8 +35,9 @@ spec:
           args:
             - |
               set +e
-              k6 run --out json=/out/k6.json /scripts/sideband-decision.js
+              k6 run --out json=/out/k6.json --summary-export=/out/k6-summary.json /scripts/sideband-decision.js
               k6_exit=$?
+              printf '%s\n' "${k6_exit}" > /out/k6-exit-code
               echo "k6 exited with code ${k6_exit}; holding pod for result collection"
               sleep "${COLLECT_GRACE_SECONDS:-120}"
               exit ${k6_exit}
