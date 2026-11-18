@@ -103,6 +103,10 @@ else:
     sys.exit('package creation response carries no id — if this is a 404, the pinned PAP image lacks the deployment-packages API: fall back to snapshot-export tooling or a newer builder PAP (spec pivot note); inspect the response above')
 ")"
 echo "Created package ${pkg_name} (${pkg_id})" >&2
+# Machine-readable marker for the deploy script: it waits until BOTH PAZ
+# replicas' logs confirm THIS exact package id, so a quick re-deployment
+# cannot pass on the previous package's confirmation (final review, finding 1).
+echo "PACKAGE_ID=${pkg_id}"
 
 # --- 4. publish through PAP to the store --------------------------------------
 # PAP writes the package object (named by package id) and the pointer file

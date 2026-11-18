@@ -41,17 +41,20 @@ if (agentIndex >= agentCount) {
 const rate = distributeRate(totalRate, agentCount);
 
 // Weighted traffic mix over the policy tree's four decision paths. The
-// weights split each agent's per-second rate; with the campaign rates
-// (100/250/500/1000 per 10 agents -> 10/25/50/100 per agent) every split is
-// an integer, and distributeRate's drift guard runs per scenario too.
+// weights split each agent's per-second rate; each scenario rate is an
+// integer (Math.round), so the configured shares deviate from the nominal
+// 60/15/15/10 by up to one request/second per scenario — e.g. 60/16/16/8
+// at 50 per agent, 60/15.33/15.33/9.33 at 150. Denials take the remainder
+// so the four rates always sum exactly to the agent rate (the sum check
+// below); there is no per-scenario drift guard.
 const MIX = {
   read: 0.6,     // read-permit path: the cheap 4-rule ladder
   session: 0.15, // session methods: initialize/tools-list/ping tool gate
   hitl: 0.15,    // order submission with HITL approval token: 10-rule ladder
   deny: 0.1,     // expected denials: full ladder walked to a deny verdict
 };
-// Split THIS AGENT's rate; whole-iteration rounding drifts are caught by the
-// sum check below (fractional weights can round badly at small rates).
+// Split THIS AGENT's rate; the rounding drift lands on the deny remainder,
+// and the sum check below verifies the four rates still add up exactly.
 function splitRate(fraction) {
   return Math.round(rate * fraction);
 }

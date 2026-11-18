@@ -129,28 +129,36 @@ PY
     "${ROOT_DIR}/scripts/verify.sh"
 
     # --- 3. publish the policy package through PAP (writes package + pointer) ---
-    package_before="$(kubectl -n "${NAMESPACE}" logs "pod/${PAZ_RELEASE}-pingauthorize-0" 2>/dev/null | \
-      grep -oE 'DeploymentPackage [0-9a-f-]{36}' | tail -1 || true)"
-    "${ROOT_DIR}/scripts/build-package.sh"
+    build_output="$("${ROOT_DIR}/scripts/build-package.sh")"
+    package_id="$(echo "${build_output}" | sed -n 's/^PACKAGE_ID=//p')"
+    [[ -n "${package_id}" ]] || {
+      echo "ERROR: build-package.sh did not report a PACKAGE_ID; cannot confirm the load." >&2
+      exit 1
+    }
+    echo "Published package ${package_id}."
 
-    # --- 4. wait until the PAZ poller loads the new package (30s interval) ---
-    echo "Waiting for the PAZ nodes to load the published package (poll-interval 30s)..."
+    # --- 4. wait until BOTH PAZ replicas confirm that exact package id ---
+    echo "Waiting for the PAZ nodes to load package ${package_id} (poll-interval 30s)..."
     deadline=$((SECONDS + 180))
     loaded=""
+    loaded1=""
     while (( SECONDS < deadline )); do
-      loaded="$(kubectl -n "${NAMESPACE}" logs "pod/${PAZ_RELEASE}-pingauthorize-0" --since=3m 2>/dev/null | \
-        grep -c 'Successfully deployed package' || true)"
-      loaded1="$(kubectl -n "${NAMESPACE}" logs "pod/${PAZ_RELEASE}-pingauthorize-1" --since=3m 2>/dev/null | \
-        grep -c 'Successfully deployed package' || true)"
+      # The id must appear in the log AFTER the publish: match the id itself,
+      # not a bare 'Successfully deployed package' that an earlier package's
+      # line would also satisfy.
+      loaded="$(kubectl -n "${NAMESPACE}" logs "pod/${PAZ_RELEASE}-pingauthorize-0" --since=5m 2>/dev/null | \
+        grep -c "Successfully deployed package.*${package_id}\|${package_id}.*[Ss]uccessfully" || true)"
+      loaded1="$(kubectl -n "${NAMESPACE}" logs "pod/${PAZ_RELEASE}-pingauthorize-1" --since=5m 2>/dev/null | \
+        grep -c "Successfully deployed package.*${package_id}\|${package_id}.*[Ss]uccessfully" || true)"
       if [[ "${loaded}" -ge 1 && "${loaded1}" -ge 1 ]]; then
-        echo "Both PAZ replicas loaded the package from the store."
+        echo "Both PAZ replicas confirmed package ${package_id}."
         break
       fi
       sleep 10
     done
     if [[ "${loaded}" -lt 1 || "${loaded1}" -lt 1 ]]; then
-      echo "ERROR: the PAZ nodes did not load the package within 3 minutes." >&2
-      echo "Check: kubectl -n ${NAMESPACE} logs pod/${PAZ_RELEASE}-pingauthorize-0 | grep PDP" >&2
+      echo "ERROR: the PAZ nodes did not confirm package ${package_id} within 3 minutes." >&2
+      echo "Check: kubectl -n ${NAMESPACE} logs pod/${PAZ_RELEASE}-pingauthorize-0 | grep -i 'deployed package'" >&2
       exit 1
     fi
 

@@ -14,12 +14,10 @@ poll and load it without a restart. PAP is off the decision path.
 ```
 pingauthorize/            PAZ (the measured node, 2 replicas)
 ├── pd.profile/dsconfig/
-│   ├── 20-token-validator.dsconfig.subst   local trusted-certificate JWT validator (PerfSubjectJWT)
+│   ├── 20-token-validator.dsconfig.subst   PerfSubjectJWT: a JWKS validator (RS256) over the in-cluster JWKS server
 │   ├── 30-embedded-pdp.dsconfig.subst      pdp-mode:embedded + the S3 deployment package store (poll-interval 30s)
 │   └── 40-sideband.dsconfig.subst          sideband shared secret + endpoint (AgentGateway service, /mcp)
-├── hooks/                                  (none — the chart's stock hooks apply the pd.profile layer)
-└── instance/server/default/data/
-    └── perf-subject-cert.pem               self-signed public certificate matching the k6 signing key
+└── hooks/                                  (none — the chart's stock hooks apply the pd.profile layer)
 
 pingauthorizepap/         PAP (package authoring only; idle during load runs)
 ├── policies/
@@ -43,17 +41,24 @@ data comes from the deployment package published on top of that commit.
    private S3 bucket, a least-privilege IAM user, and writes the credentials
    into `.env`. This is the artifact plane — policy packages live in the
    bucket, not in git.
-1. PAP first: `helm install` with PAZ disabled. PAP's hook imports and
-   commits `AgentGatewayPortfolioMCP` at boot.
-2. `./scripts/build-package.sh` builds the deployment package from PAP's API
-   (export committed head → create package rooted at the Global Decision
-   Point → download bytes) and uploads it to
-   `s3://<bucket>/<prefix>/` — the API equivalent of the Policy Editor's
-   publish-to-store action.
-3. Enable PAZ (`helm upgrade`): it boots in embedded-PDP mode, creates the
-   S3 store definition from this layer, and polls the bucket (30 s
-   interval). A later `build-package.sh` run is picked up by polling — no
-   restart. PAP stays deployed but idle; no decision ever touches it.
+1. `./scripts/create-secrets.sh` (also runs inside deploy.sh): builds the
+   TLS secrets and the `paz-secrets`/`paz-s3`/`paz-loadtest` Secrets.
+2. One Helm release installs BOTH products together
+   (`helm/paz/values.yaml` drives the upstream chart): PAP (whose boot hook
+   imports and commits `AgentGatewayPortfolioMCP`) and the two PAZ replicas
+   (which boot in embedded-PDP mode and register the S3 package store).
+   deploy.sh waits for both to become Ready and runs `verify.sh`.
+3. `./scripts/build-package.sh` publishes the policy package entirely
+   through PAP's API: export the committed branch head snapshot → create a
+   package rooted at the Global Decision Point → POST it to PAP's
+   package-store endpoint — PAP writes the package bytes AND the pointer
+   file into the S3 bucket (the same two objects the Deployment Manager
+   UI's Publish action writes) → download an inspection copy into
+   `results/`. deploy.sh then waits until both PAZ replicas' logs confirm
+   the published package id.
+4. From then on the PAZ poller picks up any later `build-package.sh` run
+   within its 30 s interval — no restart. PAP stays deployed but idle; no
+   decision ever touches it.
 
 ## Version-specific verifications (record your findings here)
 
@@ -63,10 +68,10 @@ heading; adjust the dsconfig files if reality differs.
 
 ### In-container server root for profile data files
 
-`${PAZ_CERT_PATH}` (20-token-validator) must be the absolute in-container
-path of `instance/server/default/data/perf-subject-cert.pem`. Verify on the
-running PAZ with `kubectl exec <pod> -- find / -name perf-subject-cert.pem
-2>/dev/null`. Finding (fill in on first deploy):
+The profile layers deploy under `/tmp/server-profile/server-profiles/` in
+the PAZ container (the chart's profile mount). Verify on the running PAZ
+with `kubectl exec <pod> -- find / -name '40-sideband*' 2>/dev/null`.
+Finding (fill in on first deploy):
 
 ### Deployment package store property spellings
 

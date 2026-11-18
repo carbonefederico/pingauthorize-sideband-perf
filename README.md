@@ -88,13 +88,24 @@ Load is distributed at three layers. Across the generator: the target rate
 splits evenly over the ten k6 agent pods (RATE/10 per agent, enforced by
 `distributeRate`, which fails the run loudly when the split drifts more
 than 5%). Within each agent: the per-agent rate splits into four
-ramped-arrival scenarios that map onto the policy paths above — 60% reads
-(policy 2), 15% session methods (policy 1), 15% HITL orders (policy 4),
-and 10% expected denials, which rotate through four negative fixtures
-(undeclared acting agent and missing `act.sub` → R2, oversized order →
-policy 5, wrong audience → R1) and so walk the ladder to a deny verdict.
-Denials take the split remainder so rounding cannot break the sum, and a
-per-scenario drift guard re-checks it. Across the server: the ten agents
+ramped-arrival scenarios that map onto the policy paths above — nominally
+60% reads (policy 2), 15% session methods (policy 1), 15% HITL orders
+(policy 4), and 10% expected denials, which rotate through four negative
+fixtures (undeclared acting agent and missing `act.sub` → R2, oversized
+order → policy 5, wrong audience → R1) and so walk the ladder to a deny
+verdict. Denials take the split remainder so the four rates always sum to
+the agent rate; because each scenario's rate is an integer, the nominal
+mix rounds to these **configured plateau shares per level**:
+
+| Level | read | session | HITL | deny |
+|---|---:|---:|---:|---:|
+| 500/s (50/agent) | 60% | 16% | 16% | 8% |
+| 1000/s (100/agent) | 60% | 15% | 15% | 10% |
+| 1500/s (150/agent) | 60% | 15.33% | 15.33% | 9.33% |
+| 2000/s (200/agent) | 60% | 15% | 15% | 10% |
+
+The delivered per-scenario request counts in every counted run match
+these shares. Across the server: the ten agents
 POST to the cluster-internal PAZ Service, which load-balances across the
 two StatefulSet pods.
 
@@ -116,16 +127,19 @@ deployment-package mode only).
 ## Test environment and sizing
 
 The campaign ran on a shared Kubernetes cluster of six `r5.xlarge` worker
-nodes (4 vCPU / 32 GiB each, 3,400m allocatable CPU after system
-reservations). The PAZ pods carried lab sizing of 2 CPU / 3 GiB requests
-against 4 CPU / 6 GiB limits, one pod per node (the two PAZ nodes together
-held 8 of the cluster's 20.4 allocatable vCPUs); PAP, the package-authoring
-surface, carried 1 CPU / 2 GiB requests and 2 / 4 GiB limits and is idle
-during runs. The ten k6 agent pods requested 500m CPU each with a 4 CPU
-limit, and a required anti-affinity term kept every agent off the two PAZ
-nodes. The reference results are figures for this environment: two PAZ pods
-sized at half their CPU limit, a generator provisioned at ~25% of a node
-per agent, and co-tenant workloads present but off the PAZ nodes. Node
+nodes (4 vCPU / 32 GiB each; 3,400m allocatable CPU per node after system
+reservations — 20.4 vCPU cluster-wide). The PAZ pods carried lab sizing of
+2 CPU / 3 GiB **requests** against 4 CPU / 6 GiB **limits**, one pod per
+node: the two PAZ nodes thus reserved 4 of their 3.4 allocatable vCPUs
+each, while the pods may burst to a combined 8 CPU of limits that is not
+reserved node capacity. PAP, the package-authoring surface, carried
+1 CPU / 2 GiB requests and 2 / 4 GiB limits and is idle during runs. The
+ten k6 agent pods **requested** 500m CPU each with a 4 CPU limit, and a
+required anti-affinity term kept every agent off the two PAZ nodes. The
+reference results are figures for this environment: two PAZ pods sized at
+half their CPU limit, a generator that requests ~15% of a node's
+allocatable CPU per agent (500m of 3,400m) but may burst well beyond it,
+and co-tenant workloads present but off the PAZ nodes. Node
 inventory and pod-to-node placement for every run are recorded in
 `results/<run_id>/env.json`.
 
@@ -290,7 +304,9 @@ kubectl -n ${NAMESPACE} port-forward pod/${PAZ_RELEASE}-pingauthorize-0 18443:14
 ### Step 2 — run the campaign (two terminals)
 
 ```bash
-# Terminal A — resource monitor; leave running for the whole campaign:
+# Terminal A (optional troubleshooting) — continuous pod/node CPU CSV into
+# results/; the report does NOT consume this file (the per-run CPU evidence
+# comes from the in-run sampler inside run-in-cluster.sh):
 ./scripts/monitor.sh
 
 # Terminal B — sanity run, then the ladder, three ascending rounds:
@@ -372,12 +388,15 @@ decisions, not accidents — changing any of them changes what the benchmark
 measures.
 
 1. **Token validation is JWKS-based, with one static signing key.** Subject
-   tokens are self-signed RS256 by k6 (kid `perf-subject-key`) and validated
-   by PAZ's JWKS validator, which fetches the public key from an in-cluster
-   JWKS endpoint (`https://paz-perf-subject` — issuer-publishes/
-   verifier-fetches) and caches it. The fetch and
-   cache are on the measured path; key *rotation* is not exercised (the
-   campaign signs every token with the same static key).
+   tokens are self-signed RS256 by k6 (kid `perf-subject-key`) with issuer
+   `https://paz-perf-subject` (SUBJECT_ISSUER — the token's `iss` claim).
+   PAZ's JWT validator (PerfSubjectJWT) resolves the issuer to an HTTP
+   external server and fetches the public key set from that server's
+   endpoint: the loadtest chart deploys a separate JWKS server pod
+   (`<release>-jwks`), which publishes the JWK document at
+   `http://<release>-jwks/.well-known/jwks.json`; PAZ fetches and caches
+   it. The fetch and cache are on the measured path; key *rotation* is not
+   exercised (the campaign signs every token with the same static key).
 2. **No persistent-store work on the decision path.** PAZ runs standalone
    with an embedded store and ephemeral data; the measured decisions evaluate
    the in-process policy package and touch no user store. The S3 package
@@ -394,8 +413,10 @@ measures.
    sideband request exactly as a gateway-side extAuthz adapter does
    (the envelope schema is pinned by unit tests against that adapter's
    shape). The measured traffic is a weighted
-   policy mix — 60% reads, 15% MCP session methods (top-level jsonrpc),
-   15% HITL order approvals, 10% expected denials, per agent rate — so
+   policy mix — nominally 60% reads, 15% MCP session methods (top-level
+   jsonrpc), 15% HITL order approvals, and 10% expected denials per agent
+   rate (exact per-level shares in the traffic-mix section; integer
+   rounding shifts the smaller scenarios by up to one request/second) — so
    every measured window exercises all four policy paths, not just the
    cheapest one. The measured hop is the hop a gateway integration adds:
    the sideband request plus PAZ's decision. No gateway, adapter, or MCP
@@ -411,8 +432,11 @@ measures.
    Gateway Timing providers need enabling, they are enabled once before the
    first counted run and never toggled — every number carries the same
    overhead. No paired on/off runs.
-6. **The nodes are shared.** Co-tenant load during a run is visible in the
-   report's node-CPU panel and is an uncontrolled environmental factor. The
+6. **The nodes are shared.** Co-tenant load during a run is an uncontrolled
+   environmental factor that the report does not isolate — the report
+   shows the PAZ and generator pods' CPU only (per-pod medians and
+   per-pod CPU charts; co-tenants on the same nodes would depress the
+   PAZ pods' available capacity without appearing anywhere). The
    campaign bound (2000/s) exists because of this; reference levels are
    measured as-is, never driven to failure. The median-of-three protocol
    exists to make residual co-tenant noise visible as run-to-run spread
@@ -426,7 +450,7 @@ measures.
 ## Reference results — campaign of 2026-11-18
 
 Twelve counted runs: three ascending rounds of the 500 → 1000 → 1500 →
-2000 ladder (23:51 on Nov 17 through 00:50 on Nov 18), captured entirely
+2000 ladder (23:36 UTC on Nov 17 through 00:58 UTC on Nov 18), captured entirely
 by the final instrumentation — per-agent exit codes, k6 structured
 summaries, per-request outcome classification with expected embedded
 denial statuses, full-call elapsed, and the ack-based collector. Every

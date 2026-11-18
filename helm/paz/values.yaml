@@ -50,8 +50,6 @@ ping-devops:
           cpu: '4'
           memory: 6Gi
       env:
-      - name: PAZ_CERT_PATH
-        value: /tmp/server-profile/server-profiles/pingauthorize/instance/server/default/data/perf-subject-cert.pem
       - name: SIDEBAND_SHARED_SECRET
         valueFrom:
           secretKeyRef:
