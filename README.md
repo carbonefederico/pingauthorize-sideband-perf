@@ -43,10 +43,10 @@ What is deliberately absent: no API gateway, no adapter, and
 no ingress in front of the PDP (the measured path keeps its cluster-internal
 Service). PAP is the one exposed workload — the policy administrator's
 inspection surface, via the cluster's nginx-public ingress with a
-cert-issued TLS host. Token validation is JWKS-based: the loadtest chart
-publishes the subject key's JWKS from an in-cluster endpoint
-(`<release>-jwks`), PAZ fetches and caches it (issuer-publishes/
-verifier-fetches), and that fetch-plus-cache sits on
+cert-issued TLS host. Token validation is JWKS-based: the PAZ wrapper
+chart deploys a JWKS server that publishes the subject key's JWK set from
+an in-cluster endpoint (`<release>-jwks`), PAZ fetches and caches it
+(issuer-publishes/verifier-fetches), and that fetch-plus-cache sits on
 the measured path. Policy delivery is production-shaped:
 PAP authors the policy, `build-package.sh` publishes the immutable package
 through PAP's package-store API to a private, versioned S3 bucket (PAP
@@ -130,9 +130,10 @@ The campaign ran on a shared Kubernetes cluster of six `r5.xlarge` worker
 nodes (4 vCPU / 32 GiB each; 3,400m allocatable CPU per node after system
 reservations — 20.4 vCPU cluster-wide). The PAZ pods carried lab sizing of
 2 CPU / 3 GiB **requests** against 4 CPU / 6 GiB **limits**, one pod per
-node: the two PAZ nodes thus reserved 4 of their 3.4 allocatable vCPUs
-each, while the pods may burst to a combined 8 CPU of limits that is not
-reserved node capacity. PAP, the package-authoring surface, carried
+node: each PAZ pod requests 2 CPUs on a node with 3.4 allocatable vCPUs,
+so together the two pods request 4 CPUs across 6.8 allocatable vCPUs;
+their combined CPU limits total 8 CPUs, and limits do not reserve
+capacity. PAP, the package-authoring surface, carried
 1 CPU / 2 GiB requests and 2 / 4 GiB limits and is idle during runs. The
 ten k6 agent pods **requested** 500m CPU each with a 4 CPU limit, and a
 required anti-affinity term kept every agent off the two PAZ nodes. The
@@ -392,8 +393,8 @@ measures.
    `https://paz-perf-subject` (SUBJECT_ISSUER — the token's `iss` claim).
    PAZ's JWT validator (PerfSubjectJWT) resolves the issuer to an HTTP
    external server and fetches the public key set from that server's
-   endpoint: the loadtest chart deploys a separate JWKS server pod
-   (`<release>-jwks`), which publishes the JWK document at
+   endpoint: the PAZ wrapper chart (helm/paz/templates) deploys a separate
+   JWKS server pod (`<release>-jwks`), which publishes the JWK document at
    `http://<release>-jwks/.well-known/jwks.json`; PAZ fetches and caches
    it. The fetch and cache are on the measured path; key *rotation* is not
    exercised (the campaign signs every token with the same static key).
