@@ -105,8 +105,8 @@ decisions/second**. It shares the PF campaign's scope discipline, and the
 results support no conclusions about: the saturation point or maximum
 sustainable throughput (no level is run to failure — the cluster is shared
 with workloads this project does not own; 2000/s is the campaign bound,
-where PAZ sat at a whole-run 1,834 m mean-of-medians of its 4,000 m
-per-pod CPU limit (46%) with a still-smooth latency curve); behavior
+where PAZ sat at a whole-run 1,866 m mean-of-medians of its 4,000 m
+per-pod CPU limit (47%) with a still-smooth latency curve); behavior
 above 2000/s; overload, burst, failure, or recovery
 behavior; autoscaling (the PAZ topology is fixed at two pods); or a
 comparison against external-PDP mode (this campaign measures
@@ -389,22 +389,11 @@ measures.
    deployment — a background scan whose cost is part of the measured system.
    Subject identity rotates through 100 synthetic VIP users, and PAZ keeps no
    per-subject state on this path, so 100 hot identities exercise the same
-   code paths as a cold population.
-   **Token-uniqueness limitation (historical):** the campaign's `jti` was
-   built from (user, per-VU iteration, second) without the agent identity
-   or full VU id, so independent k6 agents — and, within one agent, VUs
-   whose indices share the wrapped user index — could mint byte-identical
-   tokens within the same second. Identical claims produce identical
-   decisions, so no decision verdict is affected. Whether PAZ's validation
-   cache absorbed duplicate tokens during the campaign, at what frequency,
-   and with what effect on latency or CPU is **unknown** — the archive
-   contains no cache-hit telemetry, and no directional claim ("slightly",
-   "equally") is supported. The generator now includes run id, agent
-   index, full VU id, and scenario in `jti` (fixed after the 2026-11-17
-   reviews). The original campaign's figures stand as historical
-   measurements of the documented workload with this recorded limitation;
-   validating the corrected workload requires a fresh campaign with the
-   fixed instrumentation.
+   code paths as a cold population. **Token uniqueness:** `jti` includes the
+   run id, agent index, full VU id, scenario, and iteration (fixed after
+   the 2026-11-17 reviews found an earlier composition could collide within
+   one second across agents and across VUs sharing a wrapped user index).
+   The campaign of record (2026-11-18) ran with the fixed composition.
 3. **The envelope is the production envelope.** The load generator builds the
    sideband request exactly as the sibling project's paz-extauthz-adapter
    does (schema pinned by unit tests). The measured traffic is a weighted
@@ -436,76 +425,66 @@ measures.
    sanity run plus each stage's 30 s warmup). Cold-start behavior is not
    characterized.
 
-## Reference results — campaign of 2026-11-17 (historical)
+## Reference results — campaign of 2026-11-18
 
-Twelve runs, three ascending rounds of the 500 → 1000 → 1500 → 2000
-ladder, reprocessed with the final (oversimplified, verdict-free)
-generator over the preserved raw streams and k6 structured summaries.
-Each row is the median run of its level's three, selected by measured
-p95; the per-run p95s quoted below the table show run-to-run spread.
-The campaign is **historical**: it was captured by tooling that three
-subsequent reviews found defective, and the instrumentation of record
- today (structured summaries, per-agent exit codes, per-request outcome
-classification, full-call elapsed) postdates it. The reports issue **no
-performance verdicts** — the benchmark characterizes performance at
-specified loads; no performance SLA exists, so there are no pass/fail
-criteria to apply. A pre-campaign sanity run was not needed — the PAZ
-pods had been up and serving full-rate traffic since November 13.
+Twelve counted runs: three ascending rounds of the 500 → 1000 → 1500 →
+2000 ladder (23:51 on Nov 17 through 00:50 on Nov 18), captured entirely
+by the final instrumentation — per-agent exit codes, k6 structured
+summaries, per-request outcome classification with expected embedded
+denial statuses, full-call elapsed, and the ack-based collector. Every
+counted run shows 100% expected outcomes, zero classified errors, zero
+dropped iterations, zero malformed records, an empty `limitations` list,
+and request volume within 0.03% of the expected linear-ramp amount. Each
+table row is the median run of its level's three, selected by measured
+p95; the per-run p95s quoted below the table show run-to-run spread. The
+reports issue **no performance verdicts** — the benchmark characterizes
+performance at specified loads; no performance SLA exists, so there are
+no pass/fail criteria to apply.
+
+Two protocol notes for completeness. First, one throwaway sanity run at
+50/s preceded the ladder (10 agents, full collection path) and one
+earlier sanity attempt failed outright with DNS-resolution errors — the
+deployment still carries the project's pre-rename release name, and that
+attempt targeted a Service name that did not exist until the `.env`
+release-name fix; the failed attempt's artifacts were discarded, and the
+`.env` override now pins both the release names and the sideband URL.
+Second, the first ladder round's 500/s and 1000/s runs lost their PAZ
+CPU samples to a release-label mismatch in the in-run sampler (fixed
+mid-campaign); those two runs were superseded by make-up re-runs of the
+same profiles and discarded with the failed sanity attempt, and the
+table's 500/s and 1000/s rows are the median of {round 2, round 3,
+make-up} — three runs each, all with complete CPU evidence.
 
 **Measurement window: the whole run, including the 30 s ramp.** The
-final generator deliberately ignores phase tags and pools every raw
-sample; request counts and latency figures below therefore describe the
-ramp plus the 5-minute plateau, and average throughput sits slightly
-below the plateau target by construction (a linear ramp contributes half
-its rate on average). Phase-scoped (plateau-only) views remain
-computable from the preserved streams; the figures here are the
-whole-run ones the report defines.
+generator deliberately ignores phase tags and pools every raw sample;
+request counts and latency figures below therefore describe the ramp
+plus the 5-minute plateau, and average throughput sits slightly below
+the plateau target by construction (a linear ramp contributes half its
+rate on average). Phase-scoped (plateau-only) views remain computable
+from the preserved streams; the figures here are the whole-run ones the
+report defines.
 
 | Stage | Target rate | Requests (whole run) | avg | median | p90 | p95 | p99 | PAZ CPU/pod | Agent CPU |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 500/s | 500/s | 157,460 | 1.86 ms | 1.66 ms | 2.29 ms | 2.86 ms | 6.23 ms | 420 m | 160 m |
-| 1000/s | 1000/s | 314,960 | 2.11 ms | 1.72 ms | 2.89 ms | 4.20 ms | 8.89 ms | 856 m | 327 m |
-| 1500/s | 1500/s | 472,456 | 3.01 ms | 1.88 ms | 5.32 ms | 8.38 ms | 20.41 ms | 1,326 m | 492 m |
-| 2000/s | 2000/s | 629,960 | 6.52 ms | 2.70 ms | 15.50 ms | 25.80 ms | 51.44 ms | 1,834 m | 696 m |
+| 500/s | 500/s | 157,460 | 1.93 ms | 1.70 ms | 2.48 ms | 3.33 ms | 6.45 ms | 434 m | 175 m |
+| 1000/s | 1000/s | 314,960 | 2.29 ms | 1.79 ms | 3.43 ms | 5.03 ms | 10.50 ms | 878 m | 354 m |
+| 1500/s | 1500/s | 472,456 | 3.13 ms | 1.92 ms | 5.63 ms | 8.86 ms | 21.07 ms | 1,368 m | 532 m |
+| 2000/s | 2000/s | 629,957 | 6.77 ms | 2.73 ms | 15.91 ms | 26.67 ms | 55.69 ms | 1,866 m | 741 m |
 
-Per-run p95s by level: 500/s — 2.78 / 2.86 / 3.23 ms (median run
-`20261117110514`); 1000/s — 4.14 / 4.20 / 5.27 ms (median run
-`20261117103702`); 1500/s — 8.18 / 8.38 / 13.05 ms (median run
-`20261117112114`); 2000/s — 19.05 / 25.80 / 27.14 ms (median run
-`20261117105622`). Observed request counts track the expected volume for
-a linear ramp (target × (duration + ramp/2)) within 0.1% at every level.
-CPU medians are per pod over the whole-run interval from the 15 s
+Per-run p95s by level: 500/s — 3.02 / 3.33 / 3.40 ms (median run
+`20261118005122`); 1000/s — 4.91 / 5.03 / 5.49 ms (median run
+`20261118002816`); 1500/s — 8.71 / 8.86 / 10.17 ms (median run
+`20261118003521`); 2000/s — 24.48 / 26.67 / 33.10 ms (median run
+`20261117234329`). Observed request counts track the expected volume for
+a linear ramp (target × (duration + ramp/2)) within 0.03% at every
+level. CPU medians are per pod over the whole-run interval from the 15 s
 in-run sampler (`cpu_source: usage-during-run.txt` in every summary);
 each PAZ replica's median is separate in `summary.json`, and the table
-quotes their mean.
-
-**Limitations of these historical measurements** (each run's
-`summary.json` carries its own `limitations` list; these are the
-campaign-wide ones):
-
-- **Per-scenario outcome samples are missing.** The streams predate the
-  per-request success/error tagging, so the errors and incorrect-decisions
-  columns are absent from the report (the generator shows them only when
-  measured) and only k6's end-of-run aggregates (via the structured
-  summaries) speak to decision outcomes at all. HTTP transport failures
-  were zero in all runs; malformed-response errors would not have been
-  distinguishable from denials with the classification in force at
-  capture time.
-- **Per-agent exit codes are unavailable** (the archive predates the
-  sentinel and pod-status capture); execution status is "unavailable"
-  per agent.
-- **`sideband_request_elapsed` is unavailable** — the full-call metric
-  postdates this campaign; reprocessing cannot recover a custom metric
-  never captured, so the report omits the full-call elapsed section
-  entirely.
-- **Token-uniqueness.** `jti` was built without agent/VU identity, so
-  duplicate tokens could occur within the same second; whether PAZ's
-  validation cache absorbed them, and with what effect, is unknown (see
-  Benchmark assumption 2).
-
-A fresh campaign with the final instrumentation — structured summaries,
-per-agent exit codes, per-request outcome classification, full-call
-elapsed — is required to produce measurements with complete evidence.
+quotes their mean. Exit codes were 0 for all 120 agent pods across the
+campaign (`agent_exit_codes` in every run's `env.json`); full-call
+elapsed (including connection setup) was captured throughout — at the
+2000/s median run it reads avg 6.96 ms / p95 27 ms / p99 56 ms over
+629,957 calls.
 
 Measurement definitions, precisely: the latency columns pool every raw
 `http_req_duration` datapoint across all ten agents — per-agent
@@ -516,26 +495,27 @@ Percentiles are nearest-rank order statistics over the pooled samples.
 The headline latency is k6's `response.timings.duration` — sending +
 waiting + receiving, excluding connection establishment, which
 steady-state connection reuse amortizes to each VU's first iterations;
-full-call elapsed (including connect) is a separate metric unavailable
-in this campaign. Correctness figures come from the per-request
+full-call elapsed (including connect) is captured separately as
+`sideband_request_elapsed`. Correctness figures come from the per-request
 classification — expected-outcome percentage over success samples,
 classified errors (transport/malformed), and incorrect decisions
-(unexpected verdicts excluding errors) — none of which this campaign's
-streams could compute. CPU medians are per pod over the whole-run
-interval, quoted as the mean of the two replica medians in the table.
+(unexpected verdicts excluding errors) — computed for every request in
+every counted run. CPU medians are per pod over the whole-run interval,
+quoted as the mean of the two replica medians in the table.
 
 The shape of the ladder: the median decision latency barely moves across
-the four levels (1.66 → 1.72 → 1.88 → 2.70 ms through 4× the load), while
-the tail bends — p95 grows 9× and p99 8× — and PAZ CPU per pod scales
-almost exactly linearly with offered rate. This pattern is *consistent
-with* rising utilization as the cause (a queueing interpretation), but the
-campaign measured no per-replica queue depths, thread pools, GC telemetry,
-or CPU throttling, so it remains a hypothesis; the CPU figures alone do
-not rule out internal saturation. At the campaign bound the measured
-1,834 m mean-of-medians sits at 46% of the pods' 4-CPU limit — but the
-pods share 3.4-allocatable-CPU nodes with co-tenants, so the limit is a
-ceiling, not a guaranteed capacity: headroom against the *node* is
-smaller than headroom against the limit.
+the four levels (1.70 → 1.79 → 1.92 → 2.73 ms through 4× the load), while
+the tail bends — p95 grows 8× and p99 8.6× — and PAZ CPU per pod scales
+slightly super-linearly with offered rate (2.0× / 3.2× / 4.3× the 500/s
+level at 2× / 3× / 4× the rate). This pattern is *consistent with* rising
+utilization as the cause (a queueing interpretation), but the campaign
+measured no per-replica queue depths, thread pools, GC telemetry, or CPU
+throttling, so it remains a hypothesis; the CPU figures alone do not rule
+out internal saturation. At the campaign bound the measured 1,866 m
+mean-of-medians sits at 47% of the pods' 4-CPU limit — but the pods share
+3.4-allocatable-CPU nodes with co-tenants, so the limit is a ceiling, not
+a guaranteed capacity: headroom against the *node* is smaller than
+headroom against the limit.
 
 ## Configuration and safety notes
 

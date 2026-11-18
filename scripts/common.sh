@@ -53,8 +53,13 @@ NAMESPACE="${NAMESPACE:-paz-perf}"
 # <folder>-pingauthorize / <folder>-pingauthorizepap — the namespace convention.
 PROJECT_SLUG="$(basename "${ROOT_DIR}")"
 RELEASE="${RELEASE:-${PROJECT_SLUG}}"
-PAZ_RELEASE="${RELEASE}"
-PAP_RELEASE="${RELEASE}"
+# Per-product release names honor explicit .env overrides (the deployed stack
+# predates the project rename); an unset value falls back to the slug-derived
+# default. Previously PAZ_RELEASE/PAP_RELEASE were overwritten unconditionally,
+# so a .env override never reached the scripts (the in-run PAZ sampler queried
+# the wrong instance label for the whole stage-500 run of 2026-11-18).
+PAZ_RELEASE="${PAZ_RELEASE:-${RELEASE}}"
+PAP_RELEASE="${PAP_RELEASE:-${RELEASE}}"
 LOADTEST_RELEASE="${LOADTEST_RELEASE:-${PROJECT_SLUG}-loadtest}"
 
 require_command() {

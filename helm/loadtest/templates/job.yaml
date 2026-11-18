@@ -6,11 +6,13 @@ metadata:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  {{- if gt (int .Values.agentCount) 1 }}
+  # Indexed at every agent count: the collector locates pods by their
+  # completion-index annotation, and a non-indexed single-agent Job carries
+  # no annotation — the lookup would find no pod at all (fifth review,
+  # finding 2).
   completions: {{ int .Values.agentCount }}
   parallelism: {{ int .Values.agentCount }}
   completionMode: Indexed
-  {{- end }}
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
   template:
@@ -24,13 +26,14 @@ spec:
         - name: k6
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # Keep the container ALIVE after k6 exits (a short grace window):
-          # kubectl cp cannot reach a terminated container, so the results
-          # snapshot must happen while the pod still runs. k6 writes its final
-          # summary and flushes the JSON stream on exit; the sleep then gives
-          # the collector a full window to copy the COMPLETE file once, instead
-          # of racing k6's buffered writes mid-run (the old approach lost ~12%
-          # of datapoints). k6's exit code is preserved as the pod's outcome.
+          # Keep the container ALIVE after k6 exits until the collector has
+          # the results: kubectl cp cannot reach a terminated container, so
+          # the snapshot must happen while the pod still runs. k6 writes its
+          # final summary and flushes the JSON stream on exit; the container
+          # then waits for /out/collect-ack — created by the runner only
+          # AFTER both result files copied completely — and exits with k6's
+          # original code. COLLECT_MAX_HOLD_SECONDS bounds the wait so an
+          # abandoned run still terminates (fifth review, finding 3).
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -38,8 +41,18 @@ spec:
               k6 run --out json=/out/k6.json --summary-export=/out/k6-summary.json /scripts/sideband-decision.js
               k6_exit=$?
               printf '%s\n' "${k6_exit}" > /out/k6-exit-code
-              echo "k6 exited with code ${k6_exit}; holding pod for result collection"
-              sleep "${COLLECT_GRACE_SECONDS:-120}"
+              echo "k6 exited with code ${k6_exit}; waiting for collection (ack file or hold timeout)"
+              waited=0
+              max_hold="${COLLECT_MAX_HOLD_SECONDS:-1200}"
+              while [ ! -f /out/collect-ack ] && [ "${waited}" -lt "${max_hold}" ]; do
+                sleep 2
+                waited=$((waited + 2))
+              done
+              if [ -f /out/collect-ack ]; then
+                echo "collection acknowledged after ${waited}s"
+              else
+                echo "collection hold expired after ${waited}s without acknowledgement" >&2
+              fi
               exit ${k6_exit}
           envFrom:
             - secretRef:

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, buildClaims } from "../../helm/loadtest/files/envelope.mjs";
+import { classify, isExpectedDenial, normalizeResponseCode, buildClaims } from "../../helm/loadtest/files/envelope.mjs";
 
 // 2026-11-17 review, finding 3: errors must be separated from authorization
 // decisions. A malformed body, a transport failure, or a non-200 is an
@@ -90,6 +90,64 @@ test("200 with an embedded error object is an error, not a permit", () => {
 
 test("200 with response_code 403 is a deny", () => {
   assert.equal(classify(200, { response: { response_code: 403 } }), "deny");
+});
+
+// 2026-11-17 fifth review, finding 1: PAZ serializes the embedded
+// response_code as a string ("401" — proven live by the smoke test's
+// garbage-token decision). Numeric and string forms must score identically,
+// and malformed codes must stay errors.
+test("string response_code \"403\" is a deny, identical to numeric 403", () => {
+  assert.equal(classify(200, { response: { response_code: "403" } }), "deny");
+  assert.equal(classify(200, { response: { response_code: "401" } }), "deny");
+});
+
+test("string response_code \"500\" remains an error", () => {
+  assert.equal(classify(200, { response: { response_code: "500" } }), "error");
+});
+
+test("malformed response codes remain errors", () => {
+  for (const bad of ["40x", "40.5", "0403", "", " 401", "401 ", "499.5", "40", null, undefined, [], {}]) {
+    assert.equal(classify(200, { response: { response_code: bad } }), "error", `case ${JSON.stringify(bad)}`);
+  }
+});
+
+test("out-of-range numeric codes remain errors", () => {
+  for (const bad of [99, 100, 599, 600, -1, 0, 200, 302]) {
+    assert.equal(classify(200, { response: { response_code: bad } }), "error", `case ${bad}`);
+  }
+});
+
+test("normalizeResponseCode accepts integers and exact three-digit strings only", () => {
+  assert.equal(normalizeResponseCode(401), 401);
+  assert.equal(normalizeResponseCode("401"), 401);
+  assert.equal(normalizeResponseCode("599"), 599);
+  for (const bad of ["0403", "40", "40.5", "40x", "", null, undefined, 40.5, 99, 600]) {
+    assert.equal(normalizeResponseCode(bad), null, `case ${JSON.stringify(bad)}`);
+  }
+});
+
+// The expected-denial comparison must use the same normalization as
+// classify(): a string-coded denial satisfies a numeric fixture.
+test("isExpectedDenial matches string-coded denials against numeric fixtures", () => {
+  assert.equal(isExpectedDenial({ response: { response_code: "403" } }, 403), true);
+  assert.equal(isExpectedDenial({ response: { response_code: 403 } }, 403), true);
+  assert.equal(isExpectedDenial({ response: { response_code: "401" } }, 403), false);
+  assert.equal(isExpectedDenial({ response: { response_code: 401 } }, 403), false);
+});
+
+test("a valid but unexpected denial status fails the outcome check", () => {
+  // Right shape (a deny by classify), wrong rule (401 where 403 belongs).
+  assert.equal(classify(200, { response: { response_code: 401 } }), "deny");
+  assert.equal(isExpectedDenial({ response: { response_code: 401 } }, 403), false);
+});
+
+test("isExpectedDenial rejects malformed bodies and malformed fixtures", () => {
+  assert.equal(isExpectedDenial(null, 403), false);
+  assert.equal(isExpectedDenial({}, 403), false);
+  assert.equal(isExpectedDenial({ response: null }, 403), false);
+  assert.equal(isExpectedDenial({ response: "bad" }, 403), false);
+  assert.equal(isExpectedDenial({ response: { response_code: 403 } }, undefined), false);
+  assert.equal(isExpectedDenial({ response: { response_code: 403 } }, "403"), false);
 });
 
 // 2026-11-17 follow-up review, finding 6: within one agent, VU 1 and VU 101

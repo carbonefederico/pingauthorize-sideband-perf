@@ -8,7 +8,7 @@ import { Rate, Trend, Counter } from 'k6/metrics';
 // envelope.mjs rides in the same ConfigMap and supplies the envelope, the
 // claim set, the decision classifier, and the rate distribution guard.
 
-import { buildSidebandEnvelope, buildClaims, classify, distributeRate } from './envelope.mjs';
+import { buildSidebandEnvelope, buildClaims, classify, isExpectedDenial, distributeRate } from './envelope.mjs';
 
 // Phase-scoped metrics: the phase tag is applied per request below AND
 // carried on every custom metric, so warmup traffic is always separable
@@ -513,11 +513,11 @@ async function decide({ scenario, token, body, expectPermit, expectedDenialCode 
   // Expected verdict: permits require a permit; denials require a deny WITH
   // the fixture's expected embedded code (third review, finding 4) — a
   // valid-but-wrong denial (right shape, wrong rule) fails the check. An
-  // error is never an expected outcome in either direction.
-  const expectedDenial =
-    verdictKind === 'deny' &&
-    (expectedDenialCode === undefined ||
-      (payload && payload.response && payload.response.response_code === expectedDenialCode));
+  // error is never an expected outcome in either direction. The comparison
+  // runs through the shared normalizer (isExpectedDenial), so PAZ's string
+  // serialization ("403") matches the numeric fixture exactly (fifth
+  // review, finding 1).
+  const expectedDenial = verdictKind === 'deny' && isExpectedDenial(payload, expectedDenialCode);
   const expected = verdictKind === 'error'
     ? false
     : (expectPermit ? verdictKind === 'permit' : expectedDenial);

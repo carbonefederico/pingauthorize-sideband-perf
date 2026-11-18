@@ -99,7 +99,7 @@ def read_stream(path, agent, groups, buckets, notes):
         notes.append(f'{agent}: {malformed} malformed records excluded')
     if http_total == 0:
         notes.append(f'{agent}: no request latency samples collected')
-    return {'requests': http_total, 'first_response_utc': first, 'last_response_utc': last,
+    return {'requests': http_total, 'first_response_epoch_s': first, 'last_response_epoch_s': last,
             'observed_response_span_s': last - first if first is not None else None,
             'dropped_iterations_observed': dropped, 'malformed_records': malformed}
 
@@ -142,7 +142,10 @@ def cpu_samples(path, date, bounds, notes):
                 previous = current
                 continue
             fields = re.sub(r'^(agents:|paz:)\s*', '', line.strip()).split()
-            if current is None or len(fields) < 3 or not bounds[0] <= current <= bounds[1]:
+            # Half-open interval: a sample at the lower bound belongs to the
+            # traffic, one at the upper bound is already the next second
+            # (fifth review, finding 6).
+            if current is None or len(fields) < 3 or not bounds[0] <= current < bounds[1]:
                 continue
             cpu = float(fields[1][:-1]) if fields[1].endswith('m') else 1000 * float(fields[1])
             pods[fields[0]].append((current, cpu, memory_mib(fields[2])))
@@ -239,11 +242,19 @@ def analyze(run):
     # Native summaries alone supply native aggregate counts; never substitute logs.
     natives = [item['native_summary'] for item in agents.values()]
     dropped = sum((item['dropped_iterations'] or 0) for item in natives) if all(item is not None for item in natives) else None
+    # The collector's own explicit flag (fifth review, finding 4): the runner
+    # records whether any agent's results went uncollected. Surface it even
+    # when the files that did land look complete — an absent agent's data is
+    # invisible to every per-file check above.
+    collection_incomplete = bool(env.get('collection_incomplete', False))
+    if collection_incomplete:
+        notes.insert(0, 'collector reported collection incomplete: at least one agent\'s results were not fully collected')
     result = {'run_id': run.name, 'window': 'whole run, including ramp/warmup',
               'configured_duration_s': full_duration, 'configured_ramp_s': ramp,
               'plateau_target_per_s': rate, 'expected_requests_for_linear_ramp': rate * (duration + ramp / 2),
               'requests_observed': overall['requests'], 'average_requests_per_s': overall['requests'] / full_duration,
               'dropped_iterations': dropped, 'interrupted_iterations': None,
+              'collection_incomplete': collection_incomplete,
               'overall': overall, 'agents': agents, 'scenarios': scenarios, 'cpu': cpu,
               'cpu_source': 'usage-during-run.txt', 'limitations': notes}
     return result, buckets, pods
@@ -336,6 +347,13 @@ def render(result, buckets, pods):
                 html.append(chart(title,lines,'millicores'))
     # Consolidate absent optional instrumentation. Preserve real discrepancies.
     absent, warnings = set(), []
+    # The collector's explicit flag is a real discrepancy, not absent
+    # instrumentation — it renders in its own block ahead of the Notes.
+    if result['collection_incomplete']:
+        html.append('<div class="notes" style="background:#fdf3e7"><b>Collection incomplete</b><p>'
+                    'The collector reported that at least one agent\'s results were not fully '
+                    'collected. Per-agent coverage below may understate the run; request counts '
+                    'describe the collected responses only.</p></div>')
     for note in result['limitations']:
         if 'structured k6 summary unavailable' in note:
             absent.add('structured k6 summaries (including dropped-iteration totals)')

@@ -135,4 +135,46 @@ class ReplacementTests(unittest.TestCase):
             f'=== 10:00:30 ===\npaz: pingauthorize-0 100m 30Mi\n' for _ in range(6)))
         self.assertTrue(self.generate()['cpu_source'] == 'usage-during-run.txt')
 
+    def test_collection_incomplete_flag_surfaces(self):
+        # The collector's explicit flag must surface even when every file
+        # that landed looks complete (fifth review, finding 4): a missing
+        # agent's data is invisible to the per-file checks.
+        self.meta['collection_incomplete'] = True
+        s = self.generate()
+        self.assertTrue(s['collection_incomplete'])
+        self.assertIn("collector reported collection incomplete", s['limitations'][0])
+        html = (self.run / 'report.html').read_text()
+        self.assertIn('Collection incomplete', html)
+        # without the flag, no marker anywhere
+        self.meta['collection_incomplete'] = False
+        s = self.generate()
+        self.assertFalse(s['collection_incomplete'])
+        self.assertNotIn('Collection incomplete', (self.run / 'report.html').read_text())
+
+    def test_response_timestamp_fields_are_epoch_seconds(self):
+        # JSON names must describe their values (fifth review, finding 5):
+        # epoch seconds, not the _utc misnomer.
+        s = self.generate()
+        a = s['agents']['agent-0']
+        self.assertIn('first_response_epoch_s', a)
+        self.assertIn('last_response_epoch_s', a)
+        self.assertNotIn('first_response_utc', a)
+        self.assertNotIn('last_response_utc', a)
+        self.assertIsInstance(a['first_response_epoch_s'], float)
+        self.assertIsInstance(a['last_response_epoch_s'], float)
+
+    def test_cpu_clip_is_half_open(self):
+        # A sample exactly at the lower bound is included; one exactly at
+        # the upper bound (beginning of the next second) is excluded
+        # (fifth review, finding 6).
+        (self.run / 'usage-during-run.txt').write_text(
+            '=== 10:00:30 ===\npaz: pingauthorize-0 100m 30Mi\n'   # == lower bound
+            '=== 10:00:31 ===\npaz: pingauthorize-0 200m 30Mi\n')  # == upper bound
+        s = self.generate()
+        paz = [k for k in s['cpu'] if 'pingauthorize-0' in k]
+        self.assertTrue(paz)
+        samples = s['cpu'][paz[0]]['samples']
+        self.assertEqual(samples, 1)  # lower bound in, upper bound out
+        self.assertEqual(s['cpu'][paz[0]]['median_m'], 100.0)
+
 if __name__ == '__main__': unittest.main()

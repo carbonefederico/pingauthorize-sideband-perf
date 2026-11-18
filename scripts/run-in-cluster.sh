@@ -68,9 +68,11 @@ kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
   -l "job-name=${job_name}" --timeout=5m
 
 # Results collection happens AFTER the load completes: the k6 container holds
-# its pod alive for COLLECT_GRACE_SECONDS after k6 exits (see job.yaml), so
-# the complete, flushed k6.json can be copied once per pod — no mid-run
-# snapshot race, no datapoint loss.
+# its pod alive until the runner creates /out/collect-ack (see job.yaml) —
+# written only after BOTH result files copied completely, bounded by
+# COLLECT_MAX_HOLD_SECONDS in the pod. The old fixed grace sleep starved
+# slow transfers when ten large streams copied sequentially (fifth review,
+# finding 3).
 echo "Waiting for load to finish (${agent_count} agents)..."
 # Plain indexed array, not an associative one: macOS ships bash 3.2, which
 # has no `declare -A`, and the collector died on that line right after the
@@ -114,8 +116,13 @@ while [[ ${SECONDS} -lt ${deadline} ]]; do
     fi
     # The sentinel is written only after k6 has exited and closed its output.
     if kubectl -n "${NAMESPACE}" exec "${pod}" -c k6 -- test -f /out/k6-exit-code 2>/dev/null; then
+      # Acknowledge ONLY after both files copied completely: the pod exits
+      # on the ack, so a partial copy followed by an ack would lose data.
+      # A failed copy is retried on the next poll until the deadline; the
+      # pod's own hold timeout is the backstop that terminates it.
       if kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6.json" "${run_dir}/agent-${i}-metrics.json" -c k6 >/dev/null 2>&1 \
-        && kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6-summary.json" "${run_dir}/agent-${i}-summary.json" -c k6 >/dev/null 2>&1; then
+        && kubectl -n "${NAMESPACE}" cp "${pod}:/out/k6-summary.json" "${run_dir}/agent-${i}-summary.json" -c k6 >/dev/null 2>&1 \
+        && kubectl -n "${NAMESPACE}" exec "${pod}" -c k6 -- sh -c 'touch /out/collect-ack' >/dev/null 2>&1; then
         collected[$i]=yes
       else
         all_done=0
@@ -130,7 +137,7 @@ done
 collection_failed=0
 for i in $(seq 0 $((agent_count - 1))); do
   if [[ "${collected[$i]:-}" != "yes" ]]; then
-    echo "WARNING: result collection incomplete for agent-${i}" >&2
+    echo "WARNING: result collection incomplete for agent-${i} (ack not delivered: copy failed, pod gone, or hold expired)" >&2
     collection_failed=1
   fi
 done

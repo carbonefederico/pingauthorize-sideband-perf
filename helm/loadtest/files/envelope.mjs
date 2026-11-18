@@ -32,6 +32,25 @@ export function buildSidebandEnvelope({
   };
 }
 
+// normalizeResponseCode(value) -> integer 100..599, or null.
+// PAZ serializes the embedded response_code either as a number or as an
+// exact three-digit string ("401" — the smoke test's garbage-token decision
+// proves the string form occurs in practice). One normalizer for every
+// comparison so both serializations score identically. Accepts an integer
+// HTTP status code or an exact three-digit numeric string; rejects null,
+// fractional values (499.5), malformed strings ("40x", "0403", ""), and
+// out-of-range codes (99, 600, 999) — anything ambiguous or impossible is
+// null, and callers treat null as malformed evidence.
+export function normalizeResponseCode(value) {
+  const n = typeof value === "number" ? value
+    : (typeof value === "string" && /^[0-9]{3}$/.test(value)) ? Number(value)
+    : null;
+  if (n === null || !Number.isInteger(n) || n < 100 || n > 599) {
+    return null;
+  }
+  return n;
+}
+
 // classify(statusCode, parsedBody) -> "permit" | "deny" | "error".
 // PAZ signals permit as HTTP 200 with NO embedded `response` object; a 200
 // WITH a well-formed `response` object is a DENY (the trap: agentgateway's
@@ -42,9 +61,10 @@ export function buildSidebandEnvelope({
 // an authorization denial, and never scores as a decision in either
 // direction).
 //
-// A well-formed embedded denial carries an object `response` with a numeric
-// `response_code` (the sideband adapter's decision echo). A `response` that
-// is a string, an empty object, or null is ambiguous evidence — error.
+// A well-formed embedded denial carries an object `response` whose
+// `response_code` normalizes to a valid HTTP status (integer, or PAZ's
+// string serialization of one). A `response` that is a string, an empty
+// object, or null is ambiguous evidence — error.
 export function classify(statusCode, parsedBody) {
   if (statusCode !== 200) {
     return "error"; // transport failure / integration error / non-200
@@ -64,18 +84,41 @@ export function classify(statusCode, parsedBody) {
   if (typeof r !== "object" || Array.isArray(r) || !("response_code" in r)) {
     return "error"; // response without a response_code: not a well-formed denial
   }
-  const code = r.response_code;
-  // response_code must be an INTEGER (third review, finding 4: 499.5 is
-  // malformed, and -1/0/200/302 are not authorization denials). A denial is
-  // an HTTP 4xx verdict — anything else (2xx/3xx embedded "denials",
-  // negatives, zero) is not a well-formed denial verdict.
-  if (!Number.isInteger(code)) {
+  const code = normalizeResponseCode(r.response_code);
+  // response_code must normalize to a valid HTTP status (2026-11-17 fifth
+  // review, finding 1: both serializations score identically; 499.5, "40x",
+  // and out-of-range values are malformed). A denial is an HTTP 4xx verdict
+  // — anything else (2xx/3xx/5xx embedded "denials") is a server fault or
+  // malformed evidence, never a decision.
+  if (code === null) {
     return "error";
   }
   if (code < 400 || code >= 500) {
     return "error"; // non-4xx embedded verdicts: server fault or malformed
   }
   return "deny";
+}
+
+// isExpectedDenial(parsedBody, expectedDenialCode) -> boolean. True only
+// when the body carries a well-formed denial whose NORMALIZED response_code
+// equals the fixture's expected code (third review, finding 4: "any denial"
+// would let a fixture pass for the wrong reason). A valid-but-unexpected
+// denial — right shape, wrong rule, e.g. an authentication 401 where the
+// ladder's 403 belongs — returns false and fails the outcome check. The
+// normalization is the same one classify() applies, so string-coded "403"
+// matches an expected 403 exactly as the numeric form does (fifth review,
+// finding 1).
+export function isExpectedDenial(parsedBody, expectedDenialCode) {
+  if (typeof expectedDenialCode !== "number" || !Number.isInteger(expectedDenialCode)) {
+    return false; // the fixture must name a concrete code
+  }
+  const r = parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)
+    ? parsedBody.response
+    : null;
+  if (!r || typeof r !== "object" || Array.isArray(r)) {
+    return false;
+  }
+  return normalizeResponseCode(r.response_code) === expectedDenialCode;
 }
 
 // isPermit(statusCode, parsedBody) -> boolean. Kept for the unit tests and

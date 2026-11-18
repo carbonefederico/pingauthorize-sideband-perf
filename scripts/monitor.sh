@@ -24,16 +24,18 @@ nodes="$(kubectl -n "${NAMESPACE}" get pods \
 while true; do
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # Per-pod rows: both the PF release and the loadtest agents (a starved k6
-  # agent inflates measured latency — its CPU must be observable).
+  # agent inflates measured latency — its CPU must be observable). A
+  # transient kubectl/metrics-server failure must not kill the monitor
+  # (a dead monitor starves the campaign's CPU evidence) — sample best-effort.
   kubectl -n "${NAMESPACE}" top pods -l "app.kubernetes.io/instance in (${PAZ_RELEASE},${LOADTEST_RELEASE})" --no-headers 2>/dev/null \
     | awk -v ts="${timestamp}" '{print ts ",pod," $1 "," $2 "," $3}' \
-    >> "${output}"
+    >> "${output}" || true
   # Per-node rows for the nodes hosting any monitored pod.
   if [[ -n "${nodes}" ]]; then
     for node in ${nodes}; do
       kubectl top node "${node}" --no-headers 2>/dev/null \
         | awk -v ts="${timestamp}" -v n="${node}" '{print ts ",node," n "," $2 "," $3}' \
-        >> "${output}"
+        >> "${output}" || true
     done
   fi
   sleep "${MONITOR_INTERVAL_SECONDS:-5}"
