@@ -1,7 +1,7 @@
 # 40-sideband.dsconfig.subst — sideband shared secret + endpoint for the
-# load generator. Adapted from the sibling agentgateway stack's
-# 40-agp.dsconfig.subst: the secret and header blocks are identical (the k6
-# script sends PDG-TOKEN, as the sibling's adapter did); the endpoint keeps
+# load generator. Modeled on a working agentgateway integration's endpoint:
+# the secret and header blocks are identical (the k6
+# script sends PDG-TOKEN, as a gateway-side adapter does); the endpoint keeps
 # service:AgentGateway and base-path:/mcp but points at the local
 # PerfSubjectJWT validator instead of the internet-hosted JWT-Lab.
 #

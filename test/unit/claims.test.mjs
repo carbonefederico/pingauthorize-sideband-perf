@@ -4,7 +4,7 @@ import { buildClaims } from "../../helm/loadtest/files/envelope.mjs";
 
 const base = { userIndex: 0, iteration: 1, issuer: "https://paz-perf-subject", mcpAud: "https://host/mcp/portfolio" };
 
-test("claims carry the sibling permit fixture's policy-relevant values", () => {
+test("claims carry the permit fixture's policy-relevant values", () => {
   const claims = buildClaims(base);
   assert.equal(claims.sub_type, "vip_user");
   assert.equal(claims.client_id, "customer_support_agent");

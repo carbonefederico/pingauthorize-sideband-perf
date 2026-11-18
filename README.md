@@ -12,16 +12,16 @@ of 500, 1000, 1500, and 2000 decisions per second.
 The deployment under test runs PAZ in **deployment-package (embedded PDP)
 mode**: the policy state from a specific, versioned commit is exported as an
 immutable bundle and loaded into the PAZ process itself. This is the
-production integration model, and it differs from the sibling project
-`ai-mcp-gateways-paz-integrations`, whose PAZ resolved policies through PAP
-on every decision (external PDP mode). In this stack PAP exists only to build
+production integration model, and it differs from PingAuthorize's
+external-PDP mode, in which PAZ resolves policies through PAP
+on every decision. In this stack PAP exists only to build
 the package once and sits off the decision path entirely.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph k8s["Kubernetes cluster (namespace paz-perf)"]
+    subgraph k8s["Kubernetes cluster (project namespace, NAMESPACE in .env)"]
         subgraph "measured path"
         k6["k6 agents ×10<br/>(plays the gateway / PEP)"]
         svc["PAZ Service<br/>cluster-internal HTTPS"]
@@ -46,7 +46,7 @@ inspection surface, via the cluster's nginx-public ingress with a
 cert-issued TLS host. Token validation is JWKS-based: the loadtest chart
 publishes the subject key's JWKS from an in-cluster endpoint
 (`<release>-jwks`), PAZ fetches and caches it (issuer-publishes/
-verifier-fetches, as in the PF campaign), and that fetch-plus-cache sits on
+verifier-fetches), and that fetch-plus-cache sits on
 the measured path. Policy delivery is production-shaped:
 PAP authors the policy, `build-package.sh` publishes the immutable package
 through PAP's package-store API to a private, versioned S3 bucket (PAP
@@ -54,15 +54,16 @@ writes both the package object and the pointer file, exactly as the
 Deployment Manager's Publish action does), and the PAZ nodes poll and load
 it without a restart — the same machinery an S3-backed production
 deployment runs. The
-policies are the sibling project's `AgentGatewayPortfolioMCP` branch,
+policies are a real MCP-gateway policy branch (`AgentGatewayPortfolioMCP`),
 packaged as-is, so the measured decisions exercise the real policy ladder
 (audience gate, agent-identity delegation, VIP check, scope check) rather
 than a permit-all stub.
 
 ## The policy under test and the traffic mix
 
-The measured decisions come from the sibling project's
-`AgentGatewayPortfolioMCP` policy branch, imported into PAP verbatim
+The measured decisions come from the `AgentGatewayPortfolioMCP` policy
+branch (a snapshot of a working MCP-gateway authorization policy), imported
+into PAP verbatim
 (`server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP.SNAPSHOT`)
 and published to PAZ as an immutable package rooted at the branch's Global
 Decision Point. Under the `AgentGateway` service, the `Portfolio MCP` policy
@@ -101,7 +102,7 @@ two StatefulSet pods.
 
 The campaign is a **baseline characterization** of the sideband decision path
 in deployment-package mode at fixed reference levels up to **2000
-decisions/second**. It shares the PF campaign's scope discipline, and the
+decisions/second**. The
 results support no conclusions about: the saturation point or maximum
 sustainable throughput (no level is run to failure — the cluster is shared
 with workloads this project does not own; 2000/s is the campaign bound,
@@ -140,8 +141,11 @@ inventory and pod-to-node placement for every run are recorded in
   poor performance is still a useful result. The reports are descriptive:
   measurements plus explicit collection observations and limitations.
   Missing evidence renders as "unavailable" — never a favorable default.
-- The first run after a fresh deployment is discarded: one throwaway sanity
-  run warms the PAZ pods before the campaign's first counted round.
+- A throwaway sanity run (the `agents` profile at the `.env` default rate)
+  precedes the campaign: it proves the full collection path — pod
+  launch, acknowledgment-based collection, exit-code capture, report
+  generation — before any counted run, and warms the PAZ pods after a
+  fresh deployment. Sanity runs are never counted in the reference table.
 - **The measurement window is the whole run, including the ramp** — the
   generator emits no phase filtering by design (the phase tags remain on
   every request, so a phase-scoped view can be computed from the raw
@@ -229,7 +233,8 @@ reports/             The published HTML reports — the reviewer-facing layer,
 ## Quick start
 
 Every command runs on your workstation, from the project root. Nothing is run
-by hand inside the cluster. The namespace defaults to `paz-perf`.
+by hand inside the cluster. The namespace comes from `NAMESPACE` in `.env`
+(any namespace works; use one sized for the stack per the table above).
 
 ### Step 0 — one-time setup
 
@@ -238,9 +243,10 @@ by hand inside the cluster. The namespace defaults to `paz-perf`.
    scripts never touch credentials). Every script auto-creates `.env` from
    the committed defaults on first use; all its values ship with working
    lab defaults.
-2. Push this repository to GitHub (the Ping products clone their profile
-   from it at boot): `gh repo create carbonefederico/pingauthorize-sideband-perf
-   --public --source . --push`.
+2. Push this repository to a Git remote the cluster can reach (the Ping
+   products clone their server profile from `SERVER_PROFILE_URL` in `.env`
+   at boot): `gh repo create <your-org>/<repo> --public --source . --push`,
+   then set `SERVER_PROFILE_URL` in `.env` to that remote's clone URL.
 
 The deploy needs nothing else: `create-secrets.sh` (inside `deploy.sh`)
 builds the chart's TLS secrets and the `paz-secrets`/`paz-s3`/`paz-loadtest`
@@ -288,7 +294,7 @@ kubectl -n ${NAMESPACE} port-forward pod/${PAZ_RELEASE}-pingauthorize-0 18443:14
 ./scripts/monitor.sh
 
 # Terminal B — sanity run, then the ladder, three ascending rounds:
-PROFILE=agents ./scripts/run-in-cluster.sh    # discarded warm-up run
+PROFILE=agents ./scripts/run-in-cluster.sh    # sanity run (never counted)
 PROFILE=stage-500 ./scripts/run-in-cluster.sh
 PROFILE=stage-1000 ./scripts/run-in-cluster.sh
 PROFILE=stage-1500 ./scripts/run-in-cluster.sh
@@ -303,39 +309,29 @@ into `results/<run_id>/`; the runner exits non-zero when the Job fails,
 an agent pod ends non-zero, or collection is incomplete — the benchmark
 applies no performance thresholds.
 
-#### VU sizing — why the extended levels needed tuning (2026-11-16)
+#### VU sizing — how the extended levels were tuned (2026-11-16, design note)
 
-Getting the 1500/s and 2000/s levels green required tuning the per-scenario
-VU knobs (`PRE_ALLOCATED_VUS`, `MAX_VUS` in the stage profiles), and the
-dropped-iterations gate tripped on generator-side artifacts — but the
-server-side events those bursts triggered (PAZ stalled for 8–22 s at the
-transition, and once liveness-killed) are PAZ behavior and were not
-server-side-investigated; the generator was the trigger, not the whole
-story. The deciding
-evidence: at 2000/s the server delivered full rate with 100% checks and a
-clean median in every attempt, while the dropped-iterations gate tripped on
-artifacts that all traced to the warmup→measured transition. With
-`constant-arrival-rate` scenarios, the measured window opens at full rate in
-one step, and that burst of fresh TLS handshakes stalls PAZ at the boundary
-(8s on a warmed JVM; 22s on one restarted minutes earlier), which cascades
-into VU-pool exhaustion and shed iterations. Three concrete findings from
-the streams: pre-allocating 300 VUs per scenario made the transition
-stampede 15,000 VUs deep and collapsed PAZ outright (its liveness probes
-killed it — do NOT raise `PRE_ALLOCATED_VUS` toward `MAX_VUS`); a burst of
-5,000 stalled it 8s; and the same rate in steady state never stalled once
-load was flowing.
+The 1500/s and 2000/s levels required tuning the per-scenario VU knobs
+(`PRE_ALLOCATED_VUS`, `MAX_VUS` in the stage profiles) because of how the
+generator and PAZ interact at the warmup→measured transition. With
+`constant-arrival-rate` scenarios, the measured window opens at full rate
+in one step, and that burst of fresh TLS handshakes stalls PAZ at the
+boundary (observed 2026-11-16: 8 s on a warmed JVM, 22 s on one restarted
+minutes earlier), which cascades into VU-pool exhaustion and shed
+iterations. Three concrete findings from that investigation's streams:
+pre-allocating 300 VUs per scenario made the transition stampede 15,000
+VUs deep and PAZ's liveness probes killed it — so do NOT raise
+`PRE_ALLOCATED_VUS` toward `MAX_VUS`; a burst of 5,000 stalled it 8 s;
+and the same rate in steady state never stalled once load was flowing.
 
-The working configuration is now baked into the profiles and the k6 script:
-`MAX_VUS=300` at 200 it/s per agent (arrival-rate × a ~1.4s worst-case
-iteration needs that headroom; 240 shed ~200 iterations), small
-`PRE_ALLOCATED_VUS` (the transition burst must stay under what PAZ absorbs
-— 50 per scenario at 2000/s, below the 3,750 the 1500/s level absorbed
-cleanly), and `ramping-arrival-rate` measured scenarios that ramp 0→full
-over the warmup window so no step burst exists at all. With all three in
-place the 2000/s level ran with zero dropped iterations (the structured
-summaries record none) and a smooth latency curve.
-A dropped-iteration count that grows with `MAX_VUS` rather than shrinking
-is the signature of the transition burst, not the VU cap.
+The working configuration is baked into the profiles and the k6 script:
+`MAX_VUS=300` at 200 it/s per agent (arrival-rate × a ~1.4 s worst-case
+iteration needs that headroom; at 240 the pool shed ~200 iterations),
+small `PRE_ALLOCATED_VUS` (the transition burst must stay under what PAZ
+absorbs — 50 per scenario at 2000/s), and `ramping-arrival-rate` measured
+scenarios that ramp 0→full over the warmup window so no step burst exists
+at all. The campaign of record ran this configuration with zero dropped
+iterations at every level and a smooth latency curve throughout.
 
 ### Step 3 — report
 
@@ -379,7 +375,7 @@ measures.
    tokens are self-signed RS256 by k6 (kid `perf-subject-key`) and validated
    by PAZ's JWKS validator, which fetches the public key from an in-cluster
    JWKS endpoint (`https://paz-perf-subject` — issuer-publishes/
-   verifier-fetches, as in the PF campaign) and caches it. The fetch and
+   verifier-fetches) and caches it. The fetch and
    cache are on the measured path; key *rotation* is not exercised (the
    campaign signs every token with the same static key).
 2. **No persistent-store work on the decision path.** PAZ runs standalone
@@ -395,8 +391,9 @@ measures.
    one second across agents and across VUs sharing a wrapped user index).
    The campaign of record (2026-11-18) ran with the fixed composition.
 3. **The envelope is the production envelope.** The load generator builds the
-   sideband request exactly as the sibling project's paz-extauthz-adapter
-   does (schema pinned by unit tests). The measured traffic is a weighted
+   sideband request exactly as a gateway-side extAuthz adapter does
+   (the envelope schema is pinned by unit tests against that adapter's
+   shape). The measured traffic is a weighted
    policy mix — 60% reads, 15% MCP session methods (top-level jsonrpc),
    15% HITL order approvals, 10% expected denials, per agent rate — so
    every measured window exercises all four policy paths, not just the
@@ -404,12 +401,12 @@ measures.
    the sideband request plus PAZ's decision. No gateway, adapter, or MCP
    backend is in the measured path — those would measure additional
    components.
-4. **Policy constants are the sibling's.** The sideband endpoint's service
-   (`AgentGateway`), the MCP audience constant
+4. **Policy constants are real, not synthetic.** The sideband endpoint's
+   service (`AgentGateway`), the MCP audience constant
    (`https://agentgateway-stack-ag.ping-devops.com/mcp/portfolio`), and the
-   whole policy ladder come from the sibling's snapshot unchanged. The
-   measured permits exercise the same conditions the MCP gateway's permits
-   do.
+   whole policy ladder come from a real MCP-gateway policy snapshot,
+   imported into PAP verbatim (see the policy section above). The measured
+   permits exercise the same conditions the gateway's permits do.
 5. **Monitor providers stay as deployed, for the whole campaign.** If the
    Gateway Timing providers need enabling, they are enabled once before the
    first counted run and never toggled — every number carries the same
@@ -421,9 +418,10 @@ measures.
    exists to make residual co-tenant noise visible as run-to-run spread
    rather than hiding it inside a single number.
 7. **Warm state.** Ladder stages run sequentially against the same
-   deployment; all counted runs are continuously warmed (the pre-campaign
-   sanity run plus each stage's 30 s warmup). Cold-start behavior is not
-   characterized.
+   deployment; all counted runs are continuously warmed (the PAZ pods had
+   been serving production-like traffic continuously before the campaign,
+   the pre-campaign sanity run exercised them, and each stage ramps for
+   30 s). Cold-start behavior is not characterized.
 
 ## Reference results — campaign of 2026-11-18
 
@@ -543,5 +541,5 @@ headroom against the limit.
 ```
 
 The namespace is retained so credentials and the signing key survive between
-campaigns; delete it explicitly (`kubectl delete namespace paz-perf`) only
-when nothing in it is needed anymore.
+campaigns; delete it explicitly (`kubectl delete namespace "${NAMESPACE}"`)
+only when nothing in it is needed anymore.

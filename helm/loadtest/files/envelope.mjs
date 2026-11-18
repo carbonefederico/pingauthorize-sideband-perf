@@ -1,8 +1,8 @@
 // envelope.mjs — sideband envelope construction, decision parsing, and the
 // claim/rate helpers. Pure module, imported by the k6 script (inside the
 // cluster), the unit tests, and the smoke test (Node). The envelope schema
-// mirrors the sibling project's paz-extauthz-adapter buildSidebandEnvelope
-// exactly — PAZ's sideband endpoint expects this shape, and field drift
+// mirrors a gateway-side extAuthz adapter's buildSidebandEnvelope exactly —
+// PAZ's sideband endpoint expects this shape, and field drift
 // yields silently vacuous decisions (NOT_APPLICABLE), not errors.
 
 // buildSidebandEnvelope({ method, url, headers, body, sourceIp, sourcePort, httpVersion })
@@ -129,12 +129,12 @@ export function isPermit(statusCode, parsedBody) {
 }
 
 // buildClaims({ userIndex, iteration, issuer, mcpAud, userCount, runId, agentIndex })
-//   -> the subject-token claim set: the sibling project's permit fixture,
-//   with `sub` rotating through synthetic VIP users and a fresh jti per
-//   call so no token is ever replayed. jti includes the run id and agent
-//   index (2026-11-17 review, finding 6): k6 processes run independent VU
-//   and iteration counters, so (vu, iter, second) alone collides across
-//   agents and yields byte-identical tokens.
+//   -> the subject-token claim set matching the policy ladder's permit
+//   fixture, with `sub` rotating through synthetic VIP users and a fresh
+//   jti per call so no token is ever replayed. jti includes the run id and
+//   agent index (2026-11-17 review, finding 6): k6 processes run
+//   independent VU and iteration counters, so (vu, iter, second) alone
+//   collides across agents and yields byte-identical tokens.
 export function buildClaims({ userIndex, iteration, issuer, mcpAud, userCount = 100, runId = "", agentIndex = 0, vuId = 0, scenario = "" }) {
   const now = Math.floor(Date.now() / 1000);
   const user = String((userIndex % userCount) + 1).padStart(3, "0");

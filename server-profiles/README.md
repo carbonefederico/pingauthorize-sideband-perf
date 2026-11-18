@@ -23,16 +23,16 @@ pingauthorize/            PAZ (the measured node, 2 replicas)
 
 pingauthorizepap/         PAP (package authoring only; idle during load runs)
 ├── policies/
-│   ├── AgentGatewayPortfolioMCP.SNAPSHOT   the full policy branch, copied from the sibling project
+│   ├── AgentGatewayPortfolioMCP.SNAPSHOT   the full policy branch (a working MCP-gateway policy, see policies/README.md)
 │   └── README.md
 └── hooks/81-install-policies.sh            imports + commits the snapshot into branch AgentGatewayPortfolioMCP at boot
 ```
 
-The policy snapshot and the PAP bootstrap hook are byte-for-byte copies from
-the sibling project `ai-mcp-gateways-paz-integrations`
-(`agentgateway/k8s/server-profiles/`), because this campaign measures the
-same policy ladder the gateway integration uses. The two contracts that cost
-the sibling debugging time, both preserved here: importing a snapshot always
+The policy snapshot and the PAP bootstrap hook reproduce a working
+MCP-gateway authorization policy (`AgentGatewayPortfolioMCP`), because this
+campaign measures the same policy ladder a real gateway integration
+evaluates. The two snapshot-import contracts that shaped the hook, both
+preserved here: importing a snapshot always
 creates a NEW branch named in the URL (a taken name 409s), and the PDP serves
 only COMMITTED snapshots — the hook commits after import, and PAZ's policy
 data comes from the deployment package published on top of that commit.

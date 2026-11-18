@@ -2,7 +2,7 @@
 // Run via scripts/smoke.sh (port-forward must be up). Asserts, in order:
 //   (a) a valid vip_user token  -> 200, no embedded response (PERMIT). This
 //       also settles the rotated-sub question: the token carries
-//       vip-user-001, a rotated value the sibling's fixtures never used.
+//       vip-user-001, a rotated value (rotation beyond the fixture set).
 //   (b) a garbage token         -> 200 WITH response.response_code 401 — a
 //       positive policy verdict proving the validator is live (a down
 //       validator would yield the same shape for valid tokens).
@@ -12,7 +12,7 @@
 import { signToken } from "./smoke-helpers.mjs";
 // The smoke test must produce exactly what the load generator produces, so
 // the envelope and claims come from the SAME module the k6 script imports
-// (envelope.mjs — unit-tested against the sibling adapter's schema).
+// (envelope.mjs — unit-tested against the adapter's envelope schema).
 // smoke-helpers contributes only the Node-side RS256 signing, which k6
 // cannot run (it uses k6's WebCrypto).
 import { buildSidebandEnvelope, buildClaims } from "../helm/loadtest/files/envelope.mjs";
