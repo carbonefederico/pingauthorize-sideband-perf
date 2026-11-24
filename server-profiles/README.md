@@ -22,7 +22,8 @@ pingauthorize/            PAZ (the measured node, 2 replicas)
 pingauthorizepap/         PAP (package authoring only; idle during load runs)
 ├── policies/
 │   ├── AgentGatewayPortfolioMCP.SNAPSHOT   the full policy branch (a working MCP-gateway policy, see policies/README.md)
-│   ├── AgentGatewayPortfolioMCP-x100.SNAPSHOT  the 100-branch tree for the policy-tree scaling campaign (generated, see below)
+│   ├── AgentGatewayPortfolioMCP-x100.SNAPSHOT  the 100-branch tree, condition-gated (scaling campaign variant)
+│   ├── AgentGatewayPortfolioMCP-x100-services.SNAPSHOT  the 100-branch tree, service-targeted, Ping's documented dispatch shape (generated)
 │   └── README.md
 └── hooks/81-install-policies.sh            imports + commits each staged snapshot into its own branch at boot
 ```
@@ -47,7 +48,13 @@ baseline file is never modified. Both snapshots share the same Global
 Decision Point id (`a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d`) because the two
 trees never coexist in a loaded package — `build-package.sh` selects the
 tree with `POLICY_BRANCH=<branch name>`, and `swap-policy.sh` publishes a
-tree and probes both replicas before a run starts.
+tree and probes both replicas before a run starts. The services variant is
+driven through a parameterized sideband endpoint
+(`base-path:/mcp/{mcp}`, `service:AgentGateway portfolio-{mcp}` — applied
+live by `scripts/set-sideband-endpoint.sh` and therefore not part of the
+.dsconfig layer, which provisions the plain endpoint at deploy time).
+After the scaling campaign the deployment rests on the parameterized
+endpoint with the x100-services tree published.
 
 ## Deploy order (scripts/deploy.sh drives this)
 

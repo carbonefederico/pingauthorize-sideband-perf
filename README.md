@@ -155,6 +155,24 @@ the resolver census is the baseline's. As everywhere in this project, the
 benchmark applies no performance acceptance criteria: the per-branch
 latency spread and the tree-size comparison are reported as measurements.
 
+A third configuration measures the dispatch shape Ping's documentation
+recommends: a parameterized sideband endpoint
+(`base-path:/mcp/{mcp}`, `service:AgentGateway portfolio-{mcp}`) whose
+per-request derived service value targets each MCP's own policy set
+(`AgentGatewayPortfolioMCP-x100-services.SNAPSHOT`: 100 ServiceDefinitions
+and service-targeted set clones, no URL-leaf conditions on the clones).
+The condition-gated x100 tree and the baseline are measured through the
+plain endpoint (`base-path:/mcp`, `service:AgentGateway`); every
+`swap-policy.sh` target moves the endpoint and the tree together, because
+each tree expects exactly one endpoint shape. The doc background is
+PingAuthorize's sideband endpoint and path-parameter configuration (the
+endpoint's base-path routes requests and its service value targets
+policies) and the combining-algorithms page, which names `FirstApplicable`'s
+sequential sibling scan — the cost the condition-gated variant pays and
+the service-targeted variant avoids. After the campaign the deployment
+rests on the recommended shape: the parameterized endpoint with the
+x100-services tree published and probed.
+
 ## Test environment and sizing
 
 The campaign ran on a shared Kubernetes cluster of six `r5.xlarge` worker

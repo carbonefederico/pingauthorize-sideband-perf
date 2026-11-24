@@ -20,12 +20,13 @@ require_value PAP_ADMIN_PASSWORD
 
 TREE="${1:-}"
 case "${TREE}" in
-  baseline) BRANCH="AgentGatewayPortfolioMCP" ;;
-  x100)     BRANCH="AgentGatewayPortfolioMCP-x100" ;;
-  *) echo "Usage: $0 baseline|x100" >&2; exit 1 ;;
+  baseline)      BRANCH="AgentGatewayPortfolioMCP";               ENDPOINT_MODE="plain" ;;
+  x100)          BRANCH="AgentGatewayPortfolioMCP-x100";          ENDPOINT_MODE="plain" ;;
+  x100-services) BRANCH="AgentGatewayPortfolioMCP-x100-services"; ENDPOINT_MODE="parameterized" ;;
+  *) echo "Usage: $0 baseline|x100|x100-services" >&2; exit 1 ;;
 esac
 
-echo "=== Swapping policy tree: ${TREE} (PAP branch ${BRANCH}) ==="
+echo "=== Swapping policy tree: ${TREE} (PAP branch ${BRANCH}, endpoint ${ENDPOINT_MODE}) ==="
 
 # --- 1. publish the package through PAP -------------------------------------
 build_output="$("${ROOT_DIR}/scripts/build-package.sh")"
@@ -35,6 +36,9 @@ package_id="$(echo "${build_output}" | sed -n 's/^PACKAGE_ID=//p')"
   exit 1
 }
 echo "Published package ${package_id}."
+
+# --- 1b. endpoint shape must match the tree's dispatch model ----------------
+"${ROOT_DIR}/scripts/set-sideband-endpoint.sh" "${ENDPOINT_MODE}"
 
 # --- 2. wait until BOTH PAZ replicas confirm that exact package id ----------
 echo "Waiting for the PAZ nodes to load package ${package_id} (poll-interval 30s)..."
@@ -72,7 +76,10 @@ probe_env=(
   SUBJECT_SIGNING_KEY_PEM="$(cat "${SUBJECT_SIGNING_KEY_FILE}")"
 )
 probe() { # probe <mcp-aud> -> prints the probe's JSON line
-  env "${probe_env[@]}" MCP_AUD="$1" node "${ROOT_DIR}/scripts/probe-branch.mjs"
+  # Lab TLS: PAZ serves the chart's self-signed private certificate, and
+  # Node refuses it without this (same override smoke.sh applies).
+  NODE_TLS_REJECT_UNAUTHORIZED=0 env "${probe_env[@]}" MCP_AUD="$1" \
+    node "${ROOT_DIR}/scripts/probe-branch.mjs"
 }
 
 branch2="${MCP_AUD}-2"   # e.g. .../mcp/portfolio -> .../mcp/portfolio-2
