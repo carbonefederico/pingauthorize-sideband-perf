@@ -59,8 +59,8 @@ class X100ServicesTests(unittest.TestCase):
     def test_structure(self):
         self.assertIsInstance(self.x, list)
         # 161 originals + 99 branches x 41 (38 subtree clones + audience attr
-        # + ServiceDefinition + Target).
-        self.assertEqual(len(self.x), 161 + 99 * 41)
+        # + ServiceDefinition + Target) + branch-1 ServiceDefinition + Target.
+        self.assertEqual(len(self.x), 161 + 99 * 41 + 2)
         self.assertEqual(self.ids[GDP_ID]["name"], "Global Decision Point")
         footers = [e for e in self.x if isinstance(e, dict) and e.get("@class") == "DataStreamFooter"]
         self.assertEqual(len(footers), 1)
@@ -111,8 +111,24 @@ class X100ServicesTests(unittest.TestCase):
         wrapper = self.ids[AGENTGATEWAY_ID]
         # The wrapper's FIRST child stays the original condition-gated set.
         self.assertEqual(wrapper["children"][0]["id"], PORTFOLIO_ID)
+        # The original set gains branch-1's service target (its leaf condition
+        # stays: under the plain endpoint it is decisive, under the
+        # parameterized one targeting is additive).
+        original_set = self.ids[PORTFOLIO_ID]
+        b1_target = self.ids[original_set["targets"][0]]
+        b1_svc = next(e for e in self.x
+                      if isinstance(e, dict) and e.get("name") == "AgentGateway portfolio")
+        self.assertEqual(b1_target["targeted"]["services"], [b1_svc["id"]])
         gdp = self.ids[GDP_ID]
         self.assertEqual(gdp["children"][0]["id"], AGENTGATEWAY_ID)
+        # The wrapper keeps its Target element, whose services list carries
+        # plain AgentGateway + all 99 branch services: the parameterized
+        # endpoint derives 'AgentGateway portfolio-<i>' per request, and a
+        # target naming only plain 'AgentGateway' proved NotApplicable live
+        # (2026-11-24). The wrapper Target is the multi-service join point.
+        wrapper_target = self.ids[wrapper["targets"][0]]
+        # plain AgentGateway + branch-1 + branches 2..100 = 101 services.
+        self.assertEqual(len(wrapper_target["targeted"]["services"]), 101)
 
 
 if __name__ == "__main__":

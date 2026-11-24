@@ -29,7 +29,7 @@ esac
 echo "=== Swapping policy tree: ${TREE} (PAP branch ${BRANCH}, endpoint ${ENDPOINT_MODE}) ==="
 
 # --- 1. publish the package through PAP -------------------------------------
-build_output="$("${ROOT_DIR}/scripts/build-package.sh")"
+build_output="$(POLICY_BRANCH="${BRANCH}" "${ROOT_DIR}/scripts/build-package.sh")"
 package_id="$(echo "${build_output}" | sed -n 's/^PACKAGE_ID=//p')"
 [[ -n "${package_id}" ]] || {
   echo "ERROR: build-package.sh did not report a PACKAGE_ID; cannot confirm the load." >&2
