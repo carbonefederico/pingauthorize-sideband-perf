@@ -177,4 +177,45 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(samples, 1)  # lower bound in, upper bound out
         self.assertEqual(s['cpu'][paz[0]]['median_m'], 100.0)
 
+    # --- policy-tree scaling campaign (2026-11-24) ------------------------
+
+    def legacy_fixture_bytes(self):
+        """The report the unmodified legacy fixture produces — the byte-shape
+        guarantee for runs without branch tags."""
+        self.generate()
+        return (self.run / 'report.html').read_text()
+
+    def test_legacy_stream_has_no_branch_section(self):
+        legacy = self.legacy_fixture_bytes()
+        # A stream carrying no branch tags must render no per-branch section.
+        html = self.legacy_fixture_bytes()
+        self.assertNotIn('Per-branch latency spread', html)
+        # and the legacy report must be byte-identical across regenerations
+        self.assertEqual(legacy, html)
+
+    def test_branch_tags_render_decile_section(self):
+        # Tag every duration sample with branch 1 (agent-0) or 100 (agent-1):
+        # the section appears, and the decile table spans branches 1..100.
+        for agent, branch in [(0, 1), (1, 100)]:
+            for e in self.events[agent]:
+                if e['metric'] == 'http_req_duration':
+                    e['data']['tags']['branch'] = str(branch)
+        self.write_stream(0)
+        self.write_stream(1)
+        html = self.legacy_fixture_bytes()
+        self.assertIn('Per-branch latency spread', html)
+        self.assertIn('branch 1', html)
+        self.assertIn('branch 100', html)
+
+    def test_branch_1_only_tags_render_no_section(self):
+        # BRANCH_COUNT=1 runs tag everything branch=1: same shape as legacy,
+        # no section.
+        for agent in range(2):
+            for e in self.events[agent]:
+                if e['metric'] == 'http_req_duration':
+                    e['data']['tags']['branch'] = '1'
+        self.write_stream(0)
+        self.write_stream(1)
+        self.assertNotIn('Per-branch latency spread', self.legacy_fixture_bytes())
+
 if __name__ == '__main__': unittest.main()

@@ -122,7 +122,38 @@ per-pod CPU limit (47%) with a still-smooth latency curve); behavior
 above 2000/s; overload, burst, failure, or recovery
 behavior; autoscaling (the PAZ topology is fixed at two pods); or a
 comparison against external-PDP mode (this campaign measures
-deployment-package mode only).
+deployment-package mode only). The measured decisions also carry a
+policy-complexity bound: one policy branch fixes the per-decision
+evaluation work, so the results characterize the sideband decision path
+with this tree, and not how latency scales with the size or diversity of
+the policy tree behind it.
+
+## Policy-tree scaling campaign
+
+A second campaign asks the tree-size question the baseline leaves open: a
+real MCP-gateway deployment authorizes many MCP servers, so the Global
+Decision Point under load holds not one branch but roughly a hundred
+siblings, and every request must find its branch in that tree. The scaling
+campaign compares the baseline's single-branch tree against a 100-branch
+tree (`AgentGatewayPortfolioMCP-x100.SNAPSHOT`, generated from the baseline
+snapshot — 99 clones of the identical 6-policy/16-rule branch, each gated
+on its own URL leaf and minted-audience constant), measured at the
+1000 decisions/second reference level with the load generator drawing the
+branch for every request uniformly at random. The two trees are swapped by
+publishing packages (`scripts/swap-policy.sh`), and the baseline is
+re-measured interleaved with the scaling runs (three runs each,
+B/S/B/S/B/S in one session) so co-tenant drift cannot favor either tree.
+
+The comparison supports no conclusions about policy-content diversity:
+all 100 branches share the identical structure, which keeps per-branch
+evaluation cost constant (so a latency delta is attributable to tree size)
+but also means an engine that caches compiled structures could treat the
+clones as one shape that a diverse production tree could not share — a
+possible flattering bias named here rather than measured. Attribute-space
+growth (store-backed resolvers, extra services) is likewise out of scope:
+the resolver census is the baseline's. As everywhere in this project, the
+benchmark applies no performance acceptance criteria: the per-branch
+latency spread and the tree-size comparison are reported as measurements.
 
 ## Test environment and sizing
 

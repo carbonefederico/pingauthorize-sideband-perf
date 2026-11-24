@@ -8,7 +8,7 @@ import { Rate, Trend, Counter } from 'k6/metrics';
 // envelope.mjs rides in the same ConfigMap and supplies the envelope, the
 // claim set, the decision classifier, and the rate distribution guard.
 
-import { buildSidebandEnvelope, buildClaims, classify, isExpectedDenial, distributeRate } from './envelope.mjs';
+import { buildSidebandEnvelope, buildClaims, classify, isExpectedDenial, distributeRate, selectBranch, branchAudience } from './envelope.mjs';
 
 // Phase-scoped metrics: the phase tag is applied per request below AND
 // carried on every custom metric, so warmup traffic is always separable
@@ -73,6 +73,12 @@ if (readRate + sessionRate + hitlRate + denyRate !== rate) {
 const preAllocatedVUs = Number(__ENV.PRE_ALLOCATED_VUS || 25);
 const maxVUs = Number(__ENV.MAX_VUS || 200);
 const userCount = Number(__ENV.SUBJECT_USER_COUNT || 100);
+// Policy-tree scaling campaign: BRANCH_COUNT=1 (default) is the campaign of
+// record's single-branch behavior; BRANCH_COUNT=100 fans every request over
+// the x100 tree's 100 branches, drawn uniformly at random per request. The
+// branch drives BOTH the token audience and the envelope URL (they must
+// agree — the R1 gate compares the token against the branch constant).
+const branchCount = Math.max(1, Number(__ENV.BRANCH_COUNT || 1));
 const subjectIssuer = __ENV.SUBJECT_ISSUER;
 const mcpAud = __ENV.MCP_AUD;
 const sidebandUrl = __ENV.PAZ_SIDEBAND_URL;
@@ -133,10 +139,25 @@ function b64urlJson(object) {
   return encoding.b64encode(JSON.stringify(object), 'rawurl');
 }
 
+// One random branch draw per request, made in the iteration functions (never
+// init context — k6 re-runs init per VU, so init-time state would pin a VU
+// to one branch for its whole life). The caller threads it through both the
+// token's aud and the envelope URL so they always name the same branch.
+function drawBranch() {
+  return branchCount === 1 ? 1 : selectBranch(branchCount);
+}
+
+// The branch's audience: the token aud AND the envelope URL's last path
+// segment must both carry it.
+function branchUrl(branchIndex) {
+  return branchAudience(envelopeUrl, branchIndex);
+}
+
 // Build and sign one RS256 subject token (kid perf-subject-key — the name of
 // the JWK the PAZ validator fetches from the in-cluster JWKS server).
 // extraClaims merges scenario-specific claims (HITL approval binding, denial
-// negatives) over the base VIP fixture before signing.
+// negatives) over the base VIP fixture before signing; the branch aud
+// override arrives through the same merge (extraClaims.aud wins).
 async function buildSubjectToken(vu, iter, extraClaims = {}) {
   const claims = {
     ...buildClaims({
@@ -342,7 +363,8 @@ export async function readIteration() {
 // from $.method of the body — initialize/tools/list/ping are TOP-LEVEL
 // jsonrpc methods, not tools/call names).
 export async function sessionIteration() {
-  const token = await buildSubjectToken(__VU, __ITER);
+  const branch = drawBranch();
+  const token = await buildSubjectToken(__VU, __ITER, { aud: branchAudience(mcpAud, branch) });
   const body = JSON.stringify({
     jsonrpc: '2.0',
     method: 'tools/list',
@@ -350,6 +372,7 @@ export async function sessionIteration() {
   });
   await decide({
     scenario: 'mix_session',
+    branch,
     token,
     body,
     expectPermit: true,
@@ -360,6 +383,7 @@ export async function sessionIteration() {
 // + txn + the full tctx mirror of the order body), the body submits a 3k
 // order inside the approval band. All ten Allow-Orders comparisons must pass.
 export async function hitlIteration() {
+  const branch = drawBranch();
   const userIndex = (__VU + __ITER) % userCount;
   const customerId = `CUST-${String(userIndex + 1).padStart(5, '0')}`;
   const txn = `txn-${__ITER}`;
@@ -374,6 +398,7 @@ export async function hitlIteration() {
     txn,
   };
   const token = await buildSubjectToken(__VU, __ITER, {
+    aud: branchAudience(mcpAud, branch),
     approved_for: 'submit_trade_order',
     txn,
     tctx: {
@@ -387,6 +412,7 @@ export async function hitlIteration() {
   });
   await decide({
     scenario: 'mix_hitl',
+    branch,
     token,
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -407,23 +433,31 @@ export async function hitlIteration() {
 // under test ever ran. Each fixture names the embedded response_code its
 // rule produces; a valid-but-unexpected denial fails the correctness check.
 export async function denyIteration() {
+  const branch = drawBranch();
   const which = (__VU + __ITER) % 4;
   let token;
   let body;
   let expectedDenialCode;
   switch (which) {
     case 0: // undeclared acting agent -> R2 denies
-      token = await buildSubjectToken(__VU, __ITER, { act: { sub: 'marketing_agent' } });
+      token = await buildSubjectToken(__VU, __ITER, {
+        aud: branchAudience(mcpAud, branch),
+        act: { sub: 'marketing_agent' },
+      });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
       expectedDenialCode = 403;
       break;
     case 1: // no act.sub at all -> R2 denies (agent identity mismatch)
-      token = await buildSubjectToken(__VU, __ITER, { act: undefined });
+      token = await buildSubjectToken(__VU, __ITER, {
+        aud: branchAudience(mcpAud, branch),
+        act: undefined,
+      });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
       expectedDenialCode = 403;
       break;
     case 2: // oversized order (50k > 20k threshold) -> Deny Oversized
       token = await buildSubjectToken(__VU, __ITER, {
+        aud: branchAudience(mcpAud, branch),
         approved_for: 'submit_trade_order',
         txn: `txn-${__ITER}`,
         tctx: {
@@ -438,15 +472,15 @@ export async function denyIteration() {
       body = rpcBody(__VU, __ITER, 'submit_trade_order').replace('"amount":3000', '"amount":50000').replace('"quantity":3', '"quantity":100');
       expectedDenialCode = 403;
       break;
-    default: // wrong audience (gateway root, not the MCP resource) -> R1 denies
+    default: // wrong audience (gateway root, not the branch's MCP resource) -> R1 denies
       token = await buildSubjectToken(__VU, __ITER, {
-        aud: mcpAud.replace(/\/mcp\/portfolio$/, ''),
+        aud: branchAudience(mcpAud, branch).replace(/\/mcp\/.*$/, ''),
       });
       body = rpcBody(__VU, __ITER, 'get_portfolio_summary');
       expectedDenialCode = 401;
       break;
   }
-  await decide({ scenario: 'mix_deny', token, body, expectPermit: false, expectedDenialCode });
+  await decide({ scenario: 'mix_deny', branch, token, body, expectPermit: false, expectedDenialCode });
 }
 
 export default async function () {
@@ -454,14 +488,17 @@ export default async function () {
 }
 
 async function doRead(vu, iter) {
-  const token = await buildSubjectToken(vu, iter);
-  await decide({ scenario: 'mix_read', token, body: rpcBody(vu, iter), expectPermit: true });
+  const branch = drawBranch();
+  const token = await buildSubjectToken(vu, iter, { aud: branchAudience(mcpAud, branch) });
+  await decide({ scenario: 'mix_read', branch, token, body: rpcBody(vu, iter), expectPermit: true });
 }
 
-async function decide({ scenario, token, body, expectPermit, expectedDenialCode }) {
+async function decide({ scenario, branch = 1, token, body, expectPermit, expectedDenialCode }) {
+  // The envelope URL names the branch: the ResourcePath.leaf gate dispatches
+  // the tree to the branch's policy set, so URL and token aud must agree.
   const envelope = buildSidebandEnvelope({
     method: 'POST',
-    url: envelopeUrl,
+    url: branchUrl(branch),
     headers: {
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
@@ -479,14 +516,17 @@ async function decide({ scenario, token, body, expectPermit, expectedDenialCode 
   // request from the scenario clock — a static scenario tag labels the
   // plateau warmup too and blinds the report's measured-window parser.
   // One assignment rule for the HTTP metric, all custom metrics, and the
-  // check: phase is read at HTTP-call start.
+  // check: phase is read at HTTP-call start. The branch tag rides on the
+  // same rule: every metric this function emits carries it, so per-branch
+  // latency bucketing is computable offline from the raw streams.
   const phase = currentPhase();
+  const tags = { name: 'POST /sideband/request', phase, branch: String(branch) };
   const params = {
     headers: {
       'Content-Type': 'application/json',
       'PDG-TOKEN': sharedSecret,
     },
-    tags: { name: 'POST /sideband/request', phase },
+    tags,
     timeout: requestTimeout,
   };
 
@@ -497,8 +537,8 @@ async function decide({ scenario, token, body, expectPermit, expectedDenialCode 
   // first iterations of each VU's connection). elapsed = the full call wall
   // time INCLUDING connection establishment — reported separately so the
   // connection-setup share stays visible (2026-11-17 review, finding 7).
-  latency.add(response.timings.duration, { phase });
-  elapsed.add(Date.now() - wallStart, { phase });
+  latency.add(response.timings.duration, tags);
+  elapsed.add(Date.now() - wallStart, tags);
 
   let payload = null;
   try {
@@ -529,8 +569,8 @@ async function decide({ scenario, token, body, expectPermit, expectedDenialCode 
   // additional issue: checks were previously untagged).
   check(response, {
     'PAZ returned the expected verdict': () => expected,
-  }, { phase });
-  successRate.add(expected, { phase });
-  if (verdictKind === 'deny') denials.add(1, { phase });
-  if (verdictKind === 'error') errors.add(1, { phase });
+  }, tags);
+  successRate.add(expected, tags);
+  if (verdictKind === 'deny') denials.add(1, tags);
+  if (verdictKind === 'error') errors.add(1, tags);
 }

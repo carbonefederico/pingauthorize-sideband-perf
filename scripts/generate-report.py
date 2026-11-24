@@ -51,7 +51,7 @@ def group():
             'correct': 0, 'errors': 0, 'denials': 0, 'http_samples': 0, 'http_failed': 0}
 
 
-def read_stream(path, agent, groups, buckets, notes):
+def read_stream(path, agent, groups, buckets, notes, branch_durations):
     first = last = None
     http_total = dropped = malformed = 0
     opener = gzip.open if path.suffix == '.gz' else open
@@ -73,11 +73,19 @@ def read_stream(path, agent, groups, buckets, notes):
                 if name == 'dropped_iterations':
                     dropped += value
                     continue
-                scenario = data.get('tags', {}).get('scenario', '(untagged)')
+                tags = data.get('tags', {})
+                scenario = tags.get('scenario', '(untagged)')
                 g = groups.setdefault((agent, scenario), group())
                 if name == 'http_req_duration':
                     g['latency'].append(value)
                     buckets[math.floor(moment)].append(value)
+                    # Per-branch latency bucketing (policy-tree scaling
+                    # campaign): the k6 script tags every duration with the
+                    # request's randomly drawn branch; runs without the tag
+                    # record none, and stay legacy-shaped.
+                    branch = tags.get('branch')
+                    if branch is not None:
+                        branch_durations[branch].append(value)
                     first = moment if first is None else min(first, moment)
                     last = moment if last is None else max(last, moment)
                     http_total += 1
@@ -191,6 +199,7 @@ def analyze(run):
     full_duration = ramp + duration
     notes, groups = [], {}
     buckets = defaultdict(lambda: array('d'))
+    branch_durations = defaultdict(lambda: array('d'))
     expected = {f'agent-{i}' for i in range(count)}
     paths = {p.name.removesuffix('.gz').removesuffix('-metrics.json'): p
              for p in sorted(run.glob('agent-*-metrics.json.gz'))}
@@ -214,7 +223,7 @@ def analyze(run):
         else:
             notes.append(f'{agent}: structured k6 summary unavailable')
         if agent in paths:
-            item.update(read_stream(paths[agent], agent, groups, buckets, notes))
+            item.update(read_stream(paths[agent], agent, groups, buckets, notes, branch_durations))
             if item['native_summary'] and item['native_summary']['requests'] != item['requests']:
                 notes.append(f'{agent}: stream request count differs from structured summary')
         else:
@@ -249,7 +258,14 @@ def analyze(run):
     collection_incomplete = bool(env.get('collection_incomplete', False))
     if collection_incomplete:
         notes.insert(0, 'collector reported collection incomplete: at least one agent\'s results were not fully collected')
+    # Per-branch latency spread: reported only when the run fanned requests
+    # over more than one branch (a branch tag other than "1" present). Runs
+    # without branch tags — the whole campaign of record — render no section.
+    branch_labels = sorted(branch_durations, key=lambda b: (len(b), b))
+    multi_branch = any(label != '1' for label in branch_labels)
+    branch_fan_out = len(branch_labels) if multi_branch else 1
     result = {'run_id': run.name, 'window': 'whole run, including ramp/warmup',
+              'branch_fan_out': branch_fan_out,
               'configured_duration_s': full_duration, 'configured_ramp_s': ramp,
               'plateau_target_per_s': rate, 'expected_requests_for_linear_ramp': rate * (duration + ramp / 2),
               'requests_observed': overall['requests'], 'average_requests_per_s': overall['requests'] / full_duration,
@@ -257,7 +273,15 @@ def analyze(run):
               'collection_incomplete': collection_incomplete,
               'overall': overall, 'agents': agents, 'scenarios': scenarios, 'cpu': cpu,
               'cpu_source': 'usage-during-run.txt', 'limitations': notes}
-    return result, buckets, pods
+    branch_table = None
+    if multi_branch:
+        def decile(label):
+            ordered = sorted(branch_durations[label])
+            def pct(p):
+                return ordered[max(0, math.ceil(p * len(ordered)) - 1)]
+            return {'n': len(ordered), 'p50': pct(.5), 'p95': pct(.95), 'max': ordered[-1]}
+        branch_table = [{'branch': f'branch {label}', **decile(label)} for label in branch_labels]
+    return result, buckets, pods, branch_table
 
 
 def fmt(value, unit=''):
@@ -288,7 +312,7 @@ def chart(title, series, unit):
             f'<text x="50" y="220">{xmin:.0f}s</text><text x="790" y="220">{xmax:.0f}s</text></svg><p>{labels}</p>')
 
 
-def render(result, buckets, pods):
+def render(result, buckets, pods, branch_table=None):
     overall = result['overall']
     populations = [overall] + list(result['scenarios'].values()) + [g['statistics'] for g in result['agents'].values()]
     show_errors = any(g['classified_errors'] is not None for g in populations)
@@ -337,6 +361,18 @@ def render(result, buckets, pods):
                     [[fmt(e[k]) for k in ['avg_ms','p95_ms','p99_ms','requests']]])])
     html.extend(['<h2>Scenarios</h2>', table(headers,[row(name,g) for name,g in result['scenarios'].items()]),
                  '<h2>Generators</h2>', table(headers,[row(name,g['statistics']) for name,g in result['agents'].items()])])
+    if branch_table:
+        # FirstApplicable sibling-scan check: with uniform random fan-out over
+        # the tree, early and late branches carry the same share of traffic;
+        # a materially different latency at either end is a finding, reported
+        # as measured, never a verdict.
+        rows = [[b['branch'], f"{b['n']:,}", fmt(b['p50']), fmt(b['p95']), fmt(b['max'])]
+                for b in branch_table]
+        html.append('<h2>Per-branch latency spread</h2>')
+        html.append('<p>Latency bucketed by the request\'s randomly drawn policy branch '
+                    '(branch 1 is the campaign-of-record tree\'s position; branch '
+                    f'{branch_table[-1]["branch"].split()[-1]} is the last of the fan-out).</p>')
+        html.append(table(['Branch', 'Requests', 'Median ms', 'p95 ms', 'Max ms'], rows))
     if result['cpu']:
         html.extend(['<h2>CPU and memory</h2>',table(['Pod','Median CPU (m)','Peak sampled memory (MiB)'],
                     [[pod_label(pod),fmt(g['median_m']),fmt(g['peak_memory_mib'])] for pod,g in result['cpu'].items()])])
@@ -378,8 +414,8 @@ def render(result, buckets, pods):
 
 
 def generate(run):
-    result, buckets, pods = analyze(Path(run))
-    html = render(result, buckets, pods)
+    result, buckets, pods, branch_table = analyze(Path(run))
+    html = render(result, buckets, pods, branch_table)
     (Path(run) / 'report.html').write_text(html, encoding='utf-8')
     (Path(run) / 'summary.json').write_text(json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
     # The published copy lives in reports/; keep it in step with the run directory.

@@ -88,6 +88,7 @@ kubectl -n "${NAMESPACE}" create secret generic paz-loadtest \
   --from-literal=PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-25}" \
   --from-literal=MAX_VUS="${MAX_VUS:-200}" \
   --from-literal=INSECURE_SKIP_TLS_VERIFY="${INSECURE_SKIP_TLS_VERIFY:-true}" \
+  --from-literal=BRANCH_COUNT="${BRANCH_COUNT:-1}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo "Secrets ready in namespace ${NAMESPACE}: paz-secrets, paz-s3, paz-loadtest"

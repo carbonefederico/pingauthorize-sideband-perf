@@ -27,12 +27,17 @@ require_value PAP_ADMIN_PASSWORD
 
 PAP_URL="https://${PAP_PUBLIC_HOST:-${PAP_RELEASE}-pingauthorizepap.ping-devops.com}"
 AUTH="administrator:${PAP_ADMIN_PASSWORD}"
-BRANCH_NAME="AgentGatewayPortfolioMCP"
+# The PAP branch to package: the campaign of record's branch by default; the
+# policy-tree scaling campaign packages its x100 branch with
+# POLICY_BRANCH=AgentGatewayPortfolioMCP-x100. Both branches coexist committed
+# in PAP (imported by the bootstrap hook), and the package root (GDP id) is
+# shared, so only the branch name changes.
+POLICY_BRANCH="${POLICY_BRANCH:-AgentGatewayPortfolioMCP}"
 # The Global Decision Point PolicySet id inside the snapshot — the package
 # root. Verified present in the snapshot (server-profiles/README.md); if the
 # snapshot is ever regenerated with a re-created GDP, update this value.
 DECISION_NODE_ID="a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d"
-TARGET="${ROOT_DIR}/results/agentgateway-portfolio-mcp.deploymentpackage"
+TARGET="${ROOT_DIR}/results/${POLICY_BRANCH}.deploymentpackage"
 
 auth_headers=(-u "${AUTH}" -H "x-user-id: administrator" -H "X-XSRF-HEADER: ping" -k)
 
@@ -50,12 +55,12 @@ import json, sys
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('data', data.get('branches', data.get('items', [])))
 for b in items:
-    if b.get('name') == '${BRANCH_NAME}':
+    if b.get('name') == '${POLICY_BRANCH}':
         print(json.dumps(b))
         break
 ")" || true
 if [[ -z "${branch_json}" ]]; then
-  fail "Branch ${BRANCH_NAME} not found in PAP (has the bootstrap hook imported and committed it?)" \
+  fail "Branch ${POLICY_BRANCH} not found in PAP (has the bootstrap hook imported and committed it?)" \
        "GET /api/version-control/branches returned: $(echo "${branches}" | head -c 400)"
 fi
 echo "Branch found: ${branch_json}" >&2
@@ -88,7 +93,7 @@ print('Exported snapshot confirmed: ' + sid, file=sys.stderr)
 exported_id="${head_id}"
 
 # --- 3. create the deployment package --------------------------------------
-pkg_name="agentgateway-portfolio-mcp-$(date -u +%Y%m%dT%H%M%SZ)"
+pkg_name="$(echo "${POLICY_BRANCH}" | tr '[:upper:]' '[:lower:]')-$(date -u +%Y%m%dT%H%M%SZ)"
 created="$(curl -sk "${auth_headers[@]}" -X POST -H 'Content-Type: application/json' \
   -d "{\"name\":\"${pkg_name}\",\"snapshotId\":\"${exported_id}\",\"decisionNodeId\":\"${DECISION_NODE_ID}\"}" \
   "${PAP_URL}/api/deployment-packages")" \

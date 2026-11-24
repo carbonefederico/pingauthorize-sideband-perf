@@ -22,8 +22,9 @@ pingauthorize/            PAZ (the measured node, 2 replicas)
 pingauthorizepap/         PAP (package authoring only; idle during load runs)
 ├── policies/
 │   ├── AgentGatewayPortfolioMCP.SNAPSHOT   the full policy branch (a working MCP-gateway policy, see policies/README.md)
+│   ├── AgentGatewayPortfolioMCP-x100.SNAPSHOT  the 100-branch tree for the policy-tree scaling campaign (generated, see below)
 │   └── README.md
-└── hooks/81-install-policies.sh            imports + commits the snapshot into branch AgentGatewayPortfolioMCP at boot
+└── hooks/81-install-policies.sh            imports + commits each staged snapshot into its own branch at boot
 ```
 
 The policy snapshot and the PAP bootstrap hook reproduce a working
@@ -34,6 +35,19 @@ preserved here: importing a snapshot always
 creates a NEW branch named in the URL (a taken name 409s), and the PDP serves
 only COMMITTED snapshots — the hook commits after import, and PAZ's policy
 data comes from the deployment package published on top of that commit.
+The hook is snapshot-generic: it loops over every staged `*.SNAPSHOT` file,
+so the two snapshots import as two sibling PAP branches that coexist
+committed (`AgentGatewayPortfolioMCP` and `AgentGatewayPortfolioMCP-x100`).
+
+The x100 snapshot is generated, not hand-authored:
+`python3 scripts/generate-x100-snapshot.py` reads the baseline snapshot and
+emits `AgentGatewayPortfolioMCP-x100.SNAPSHOT` deterministically (uuid5 ids,
+recomputed stream digest), so regenerating is byte-identical and the
+baseline file is never modified. Both snapshots share the same Global
+Decision Point id (`a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d`) because the two
+trees never coexist in a loaded package — `build-package.sh` selects the
+tree with `POLICY_BRANCH=<branch name>`, and `swap-policy.sh` publishes a
+tree and probes both replicas before a run starts.
 
 ## Deploy order (scripts/deploy.sh drives this)
 
@@ -106,3 +120,9 @@ The policy tree targets these literals; the load generator must match them
   fail the audience gate.
 - **Global Decision Point id** (package root for build-package.sh):
   `a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d` (verified present in the snapshot).
+- **Branch leaves and audiences (x100 snapshot only)**: branch 1 is the
+  baseline's `portfolio` leaf and audience unchanged; branches 2..100 carry
+  leaf `portfolio-<n>` and audience
+  `https://agentgateway-stack-ag.ping-devops.com/mcp/portfolio-<n>`, and the
+  load generator derives both from `MCP_AUD` per request
+  (`branchAudience` in `helm/loadtest/files/envelope.mjs`).

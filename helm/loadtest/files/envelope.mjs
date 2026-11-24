@@ -172,3 +172,24 @@ export function distributeRate(totalRate, agentCount) {
   }
   return rate;
 }
+
+// selectBranch(branchCount, rng = Math.random) -> integer 1..branchCount.
+// Uniform draw for the policy-tree scaling campaign: each request targets
+// one of the tree's MCP branches at random (not round-robin, so no request
+// can predict which siblings precede its branch in the tree walk). Pure —
+// the rng is injectable for tests.
+export function selectBranch(branchCount, rng = Math.random) {
+  return Math.floor(rng() * branchCount) + 1;
+}
+
+// branchAudience(baseAud, branchIndex) -> the branch's RFC 8707 audience.
+// Branch 1 IS the campaign-of-record branch: its audience and URL stay the
+// base values. Branches 2..N suffix the last path segment, matching the
+// x100 snapshot's per-branch leaf constants (portfolio-2 .. portfolio-N).
+// Token aud and envelope URL must name the same branch on every request —
+// the R1 audience gate compares the token against the branch constant.
+export function branchAudience(baseAud, branchIndex) {
+  if (branchIndex <= 1) return baseAud;
+  return `${baseAud}-${branchIndex}`;
+}
+
