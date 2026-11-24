@@ -52,13 +52,12 @@ tree and probes both replicas before a run starts. The services variant is
 driven through a parameterized sideband endpoint
 (`base-path:/mcp/{mcp}`, `service:AgentGateway {mcp}`,
 `resource-path:{mcp}`). The endpoint shape is profile configuration:
-`40-sideband.dsconfig.subst` boots the shape named by
-`SIDEBAND_ENDPOINT_MODE` (plain | parameterized; default plain, resting
-state parameterized), and `scripts/set-sideband-endpoint.sh` applies the
-same change live on both replicas between runs — a live-only change does
-not survive a pod restart, so the profile and the live state must agree.
-After the scaling campaign the deployment rests on the parameterized
-endpoint with the x100-services tree published.
+`40-sideband.dsconfig.subst` boots the parameterized endpoint statically
+(the deployment's resting state), and
+`scripts/set-sideband-endpoint.sh` applies the other shape live on both
+replicas when a swap targets a condition-gated tree — a live-only change
+does not survive a pod restart, and the next boot returns to the
+parameterized shape.
 
 ## Deploy order (scripts/deploy.sh drives this)
 

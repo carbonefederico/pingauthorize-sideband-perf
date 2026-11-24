@@ -182,11 +182,11 @@ sequential sibling scan — the cost the condition-gated variant pays and
 the service-targeted variant avoids. After the campaign the deployment
 rests on the recommended shape: the parameterized endpoint with the
 x100-services tree published and probed. The endpoint shape is part of the
-deployed profile — the `.subst` dsconfig layer reads
-`SIDEBAND_ENDPOINT_MODE` (plain | parameterized, set in `.env` and kept in
-step by `swap-policy.sh`) — so a fresh deploy boots directly into the
-resting state, and a live endpoint swap alone cannot drift from what the
-next boot will apply.
+deployed profile — `40-sideband.dsconfig.subst` boots the parameterized
+endpoint statically — so a fresh deploy lands directly in the resting
+state; a swap to the baseline tree flips the endpoint live
+(`set-sideband-endpoint.sh` inside `swap-policy.sh`) and the next boot
+returns to the parameterized shape.
 
 ## Test environment and sizing
 

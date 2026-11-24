@@ -5,18 +5,17 @@
 # points at the local PerfSubjectJWT validator instead of the
 # internet-hosted JWT-Lab.
 #
-# The endpoint shape (plain URL-leaf dispatch vs Ping's documented
-# service-dispatch shape) is NOT chosen here: the .subst layer expands to a
-# flat dsconfig batch with no conditionals, and a shell `if` in this file
-# aborts the batch and the boot (live finding, 2026-11-24: PAZ-1
-# crash-looped on 183-run-setup.sh). The plain endpoint is what boots; the
-# parameterized shape (base-path:/mcp/{mcp},
-# service:AgentGateway {mcp}, resource-path:{mcp} — which pairs with the
-# x100-services tree) is applied live on both replicas by
-# scripts/set-sideband-endpoint.sh, driven by deploy.sh after the stack is
-# Ready and by swap-policy.sh between runs. SIDEBAND_ENDPOINT_MODE (plain |
-# parameterized, default plain) selects that shape; swap-policy.sh records
-# it back to .env so the next deploy converges on the live tree's shape.
+# The endpoint boots directly in Ping's documented service-dispatch shape —
+# the deployment's resting state, pairing with the x100-services snapshot
+# the PAP hook imports at boot (100 ServiceDefinitions and service-targeted
+# policy sets; the {mcp} capture derives the per-request service value).
+# Flat batch, no conditionals: the .subst layer cannot branch (a shell `if`
+# here aborts the expanded batch — live finding, 2026-11-24). resource-path
+# MUST carry {mcp}: base-path otherwise consumes the whole URI,
+# HttpRequest.ResourcePath resolves empty, and condition evaluation over it
+# errors INDETERMINATE (fail-closed 403). The plain shape of the campaign
+# of record (base-path:/mcp, service:AgentGateway) is reachable between runs
+# via scripts/swap-policy.sh baseline.
 
 # Order matters: the shared secret must exist before the Sideband API
 # extension references it.
@@ -32,6 +31,7 @@ dsconfig set-http-servlet-extension-prop \
 
 dsconfig create-sideband-api-endpoint \
     --endpoint-name "AgentGateway Portfolio MCP" \
-    --set service:AgentGateway \
-    --set access-token-validator:PerfSubjectJWT \
-    --set base-path:/mcp
+    --set "base-path:/mcp/{mcp}" \
+    --set "service:AgentGateway {mcp}" \
+    --set "resource-path:{mcp}" \
+    --set access-token-validator:PerfSubjectJWT

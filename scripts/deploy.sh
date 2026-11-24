@@ -121,20 +121,13 @@ PY
     install_or_upgrade "${PAZ_RELEASE}" "${ROOT_DIR}/helm/paz/values.yaml" \
       --set-string "ping-devops.pingauthorize.envs.SERVER_PROFILE_URL=${SERVER_PROFILE_URL}" \
       --set-string "ping-devops.pingauthorizepap.envs.SERVER_PROFILE_URL=${SERVER_PROFILE_URL}" \
-      --set-string "ping-devops.pingauthorize.envs.PAZ_RELEASE_NAME=${PAZ_RELEASE}" \
-      --set-string "ping-devops.pingauthorize.envs.SIDEBAND_ENDPOINT_MODE=${SIDEBAND_ENDPOINT_MODE:-plain}"
+      --set-string "ping-devops.pingauthorize.envs.PAZ_RELEASE_NAME=${PAZ_RELEASE}"
     kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
       -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorizepap" --timeout=15m
     kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
       -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorize" --timeout=20m
     "${ROOT_DIR}/scripts/verify.sh"
 
-    # --- 2b. converge the sideband endpoint on the configured shape -----------
-    # The profile boots the plain endpoint (the .subst layer cannot branch);
-    # the configured mode (SIDEBAND_ENDPOINT_MODE, default plain) is applied
-    # live here, on both replicas. A fresh deploy therefore lands directly in
-    # the resting state without a hand step.
-    "${ROOT_DIR}/scripts/set-sideband-endpoint.sh" "${SIDEBAND_ENDPOINT_MODE:-plain}"
 
     # --- 3. publish the policy package through PAP (writes package + pointer) ---
     build_output="$("${ROOT_DIR}/scripts/build-package.sh")"

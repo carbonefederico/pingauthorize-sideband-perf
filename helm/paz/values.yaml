@@ -34,9 +34,7 @@ ping-devops:
       SERVER_PROFILE_URL: ''
       SERVER_PROFILE_PATH: server-profiles/pingauthorize
       # PAZ_RELEASE_NAME (the release name, needed by the dsconfig layer to
-      # build the JWKS service URL) and SIDEBAND_ENDPOINT_MODE (plain |
-      # parameterized: which sideband endpoint shape the .subst layer boots)
-      # are injected by deploy.sh via --set-string.
+      # build the JWKS service URL) is injected by deploy.sh via --set-string.
     workload:
       type: StatefulSet
       statefulSet:

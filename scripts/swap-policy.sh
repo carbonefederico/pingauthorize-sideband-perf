@@ -40,13 +40,6 @@ echo "Published package ${package_id}."
 # --- 1b. endpoint shape must match the tree's dispatch model ----------------
 "${ROOT_DIR}/scripts/set-sideband-endpoint.sh" "${ENDPOINT_MODE}"
 
-# Record the mode so the NEXT boot (profile .subst layer) matches the tree
-# now live: a pod restart must not resurrect the other shape.
-if grep -q '^SIDEBAND_ENDPOINT_MODE=' "${ROOT_DIR}/.env" 2>/dev/null; then
-  sed -i '' "s/^SIDEBAND_ENDPOINT_MODE=.*/SIDEBAND_ENDPOINT_MODE=${ENDPOINT_MODE}/" "${ROOT_DIR}/.env"
-else
-  printf '\n# Written by swap-policy.sh: endpoint shape matching the live tree\nSIDEBAND_ENDPOINT_MODE=%s\n' "${ENDPOINT_MODE}" >> "${ROOT_DIR}/.env"
-fi
 
 # --- 2. wait until BOTH PAZ replicas confirm that exact package id ----------
 echo "Waiting for the PAZ nodes to load package ${package_id} (poll-interval 30s)..."
