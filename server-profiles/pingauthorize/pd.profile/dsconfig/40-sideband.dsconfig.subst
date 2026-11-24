@@ -1,20 +1,39 @@
 # 40-sideband.dsconfig.subst — sideband shared secret + endpoint for the
 # load generator. Modeled on a working agentgateway integration's endpoint:
 # the secret and header blocks are identical (the k6
-# script sends PDG-TOKEN, as a gateway-side adapter does); the endpoint keeps
-# service:AgentGateway and base-path:/mcp but points at the local
-# PerfSubjectJWT validator instead of the internet-hosted JWT-Lab.
+# script sends PDG-TOKEN, as a gateway-side adapter does); the endpoint
+# points at the local PerfSubjectJWT validator instead of the
+# internet-hosted JWT-Lab.
 #
-# Environment variables (injected from K8s Secrets via the chart values):
+# Environment variables (injected from K8s Secrets / deploy.sh):
 #   SIDEBAND_SHARED_SECRET — value shared with the load generator
+#   SIDEBAND_ENDPOINT_MODE — plain | parameterized (default plain)
 #
-# The service MUST stay the generic "AgentGateway" service — the PAP tree's
-# top wrapper PolicySet is targeted at it, and per-MCP selection happens one
-# level down via the wrapper's leaf attribute ("Portfolio MCP" PolicySet,
-# condition leaf == "portfolio"). Pointing the endpoint at the per-MCP
-# service instead leaves the top wrapper N/A for every request: every
-# decision comes back NOT_APPLICABLE, all permits fail and all denies pass
-# vacuously.
+# The two endpoint shapes pair with the two dispatch models the scaling
+# campaign measures:
+#
+#   plain          base-path:/mcp         service:AgentGateway
+#                  Dispatch by URL-leaf conditions inside the tree (the
+#                  campaign of record's shape). Pairs with the baseline and
+#                  condition-gated x100 trees.
+#
+#   parameterized  base-path:/mcp/{mcp}   service:AgentGateway {mcp}
+#                  resource-path:{mcp}
+#                  Ping's documented dispatch shape: the endpoint derives
+#                  the per-MCP service per request and the tree's policy
+#                  sets are targeted at those services. Pairs with the
+#                  x100-services tree. resource-path MUST carry {mcp}:
+#                  base-path otherwise consumes the whole URI,
+#                  HttpRequest.ResourcePath resolves empty, and condition
+#                  evaluation over it errors INDETERMINATE (fail-closed
+#                  403) — live finding, 2026-11-24.
+#
+# The mode lives in the profile because a live-dsconfig endpoint change
+# does not survive a pod restart: on the next boot the .subst layer
+# reapplies, and a tree/endpoint mismatch yields NOT_APPLICABLE for every
+# request. swap-policy.sh keeps the live state consistent between runs;
+# this file keeps the BOOTED state consistent with the tree the profile
+# imports. deploy.sh passes SIDEBAND_ENDPOINT_MODE through to the chart.
 
 # Order matters: the shared secret must exist before the Sideband API
 # extension references it.
@@ -33,3 +52,18 @@ dsconfig create-sideband-api-endpoint \
     --set service:AgentGateway \
     --set access-token-validator:PerfSubjectJWT \
     --set base-path:/mcp
+
+# The plain endpoint above always exists; the parameterized shape REPLACES
+# it when SIDEBAND_ENDPOINT_MODE=parameterized (one endpoint, swapped —
+# two coexisting endpoints with overlapping base paths is an
+# anti-pattern the docs warn against: ambiguous prefix routing).
+if [ "${SIDEBAND_ENDPOINT_MODE}" = "parameterized" ]; then
+    dsconfig delete-sideband-api-endpoint \
+        --endpoint-name "AgentGateway Portfolio MCP"
+    dsconfig create-sideband-api-endpoint \
+        --endpoint-name "AgentGateway Portfolio MCP" \
+        --set "base-path:/mcp/{mcp}" \
+        --set "service:AgentGateway {mcp}" \
+        --set "resource-path:{mcp}" \
+        --set access-token-validator:PerfSubjectJWT
+fi

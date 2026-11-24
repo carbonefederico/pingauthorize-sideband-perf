@@ -121,7 +121,8 @@ PY
     install_or_upgrade "${PAZ_RELEASE}" "${ROOT_DIR}/helm/paz/values.yaml" \
       --set-string "ping-devops.pingauthorize.envs.SERVER_PROFILE_URL=${SERVER_PROFILE_URL}" \
       --set-string "ping-devops.pingauthorizepap.envs.SERVER_PROFILE_URL=${SERVER_PROFILE_URL}" \
-      --set-string "ping-devops.pingauthorize.envs.PAZ_RELEASE_NAME=${PAZ_RELEASE}"
+      --set-string "ping-devops.pingauthorize.envs.PAZ_RELEASE_NAME=${PAZ_RELEASE}" \
+      --set-string "ping-devops.pingauthorize.envs.SIDEBAND_ENDPOINT_MODE=${SIDEBAND_ENDPOINT_MODE:-plain}"
     kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
       -l "app.kubernetes.io/instance=${PAZ_RELEASE},app.kubernetes.io/name=pingauthorizepap" --timeout=15m
     kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
