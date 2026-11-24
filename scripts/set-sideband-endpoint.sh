@@ -33,25 +33,25 @@ case "${MODE}" in
 esac
 ENDPOINT_NAME="AgentGateway Portfolio MCP"
 
-DSCONFIG=(kubectl -n "${NAMESPACE}" exec "pod/${PAZ_RELEASE}-pingauthorize-0" -- \
-  /opt/out/instance/bin/dsconfig -n --no-prompt)
-
-echo "Setting sideband endpoint to ${MODE} (base-path ${BASE_PATH}, service ${SERVICE})..."
-"${DSCONFIG[@]}" delete-sideband-api-endpoint --endpoint-name "${ENDPOINT_NAME}" 2>&1 | tail -1 || true
-# resource-path only applies to the parameterized shape: {mcp} preserves the
-# leaf as HttpRequest.ResourcePath. Without it the matched base path is
-# consumed, ResourcePath resolves empty, and condition evaluation on it
-# errors INDETERMINATE (live finding, 2026-11-24).
+# dsconfig talks to ONE server's mirrored-config backend; the change replicates
+# asynchronously and PAZ-1 demonstrably served a stale endpoint under live traffic
+# (finding, 2026-11-24: half the decisions hit the old shape). Apply to BOTH replicas
+# and verify on each.
 RESOURCE_PATH_ARGS=()
 [[ "${MODE}" == "parameterized" ]] && RESOURCE_PATH_ARGS=(--set "resource-path:{mcp}")
 
-"${DSCONFIG[@]}" create-sideband-api-endpoint \
-  --endpoint-name "${ENDPOINT_NAME}" \
-  --set "base-path:${BASE_PATH}" \
-  --set "service:${SERVICE}" \
-  "${RESOURCE_PATH_ARGS[@]}" \
-  --set access-token-validator:PerfSubjectJWT 2>&1 | tail -1
-
-"${DSCONFIG[@]}" list-sideband-api-endpoints 2>/dev/null | grep -F "${BASE_PATH}" | grep -F "${SERVICE}" \
-  || { echo "ERROR: endpoint does not reflect the requested shape after creation" >&2; exit 1; }
-echo "Endpoint is in ${MODE} shape."
+for pod_idx in 0 1; do
+  DSCONFIG=(kubectl -n "${NAMESPACE}" exec "pod/${PAZ_RELEASE}-pingauthorize-${pod_idx}" -- \
+    /opt/out/instance/bin/dsconfig -n --no-prompt)
+  echo "Setting sideband endpoint on ${PAZ_RELEASE}-pingauthorize-${pod_idx} to ${MODE} (base-path ${BASE_PATH}, service ${SERVICE})..."
+  "${DSCONFIG[@]}" delete-sideband-api-endpoint --endpoint-name "${ENDPOINT_NAME}" 2>&1 | tail -1 || true
+  "${DSCONFIG[@]}" create-sideband-api-endpoint \
+    --endpoint-name "${ENDPOINT_NAME}" \
+    --set "base-path:${BASE_PATH}" \
+    --set "service:${SERVICE}" \
+    "${RESOURCE_PATH_ARGS[@]}" \
+    --set access-token-validator:PerfSubjectJWT 2>&1 | tail -1
+  "${DSCONFIG[@]}" list-sideband-api-endpoints 2>/dev/null | grep -F "${BASE_PATH}" | grep -F "${SERVICE}" \
+    || { echo "ERROR: endpoint does not reflect the requested shape on replica ${pod_idx}" >&2; exit 1; }
+done
+echo "Endpoint is in ${MODE} shape on both replicas."

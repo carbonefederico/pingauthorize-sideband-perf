@@ -144,6 +144,14 @@ publishing packages (`scripts/swap-policy.sh`), and the baseline is
 re-measured interleaved with the scaling runs (three runs each,
 B/S/B/S/B/S in one session) so co-tenant drift cannot favor either tree.
 
+One earlier service-dispatch run (2026-11-24 14:24) is discarded rather
+than reported: its PAZ replicas had not converged on the same endpoint
+shape (one replica still served the plain endpoint), so half its decisions
+measured the wrong configuration — a collection-integrity observation, and
+the reason `set-sideband-endpoint.sh` now applies and verifies the endpoint
+on both replicas before any run. The reported service-dispatch run is
+20261124144442 (100% expected outcomes).
+
 The comparison supports no conclusions about policy-content diversity:
 all 100 branches share the identical structure, which keeps per-branch
 evaluation cost constant (so a latency delta is attributable to tree size)
