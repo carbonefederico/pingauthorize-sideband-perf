@@ -13,7 +13,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 POLICIES = ROOT / "server-profiles/pingauthorizepap/policies"
 BASELINE = POLICIES / "AgentGatewayPortfolioMCP.SNAPSHOT"
-COND_X100 = POLICIES / "AgentGatewayPortfolioMCP-x100.SNAPSHOT"
 SERVICES_X100 = POLICIES / "AgentGatewayPortfolioMCP-x100-services.SNAPSHOT"
 
 spec = importlib.util.spec_from_file_location(
@@ -37,13 +36,13 @@ class X100ServicesTests(unittest.TestCase):
     def setUpClass(cls):
         cls.before = {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (BASELINE, COND_X100) if p.exists()
+            for p in (BASELINE,) if p.exists()
         }
         # Regenerate only when absent (matching the condition-mode suite):
         # the committed snapshot is the regression artifact — the tests must
         # verify it, not rewrite it (review finding 3, 2026-11-24).
         if not SERVICES_X100.exists():
-            gen.main(argv=["--services"])
+            gen.main()
         cls.x = json.loads(SERVICES_X100.read_text())
         cls.ids = by_id(cls.x)
 
@@ -54,9 +53,9 @@ class X100ServicesTests(unittest.TestCase):
     def test_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "regen.SNAPSHOT"
-            gen.generate(out, services=True)
+            gen.generate(out)
             first = out.read_bytes()
-            gen.generate(out, services=True)
+            gen.generate(out)
             self.assertEqual(first, out.read_bytes())
             self.assertEqual(first, SERVICES_X100.read_bytes())
 

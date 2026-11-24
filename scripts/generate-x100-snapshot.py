@@ -2,29 +2,23 @@
 """generate-x100-snapshot.py — build the 100-branch policy-tree snapshot.
 
 Reads the baseline AgentGatewayPortfolioMCP.SNAPSHOT (the campaign of
-record's single MCP branch) and emits AgentGatewayPortfolioMCP-x100.SNAPSHOT:
-the original `Portfolio MCP` set plus 99 clones, one per synthetic MCP
-(`portfolio-2` .. `portfolio-100`), each an identical 6-policy/16-rule
-subtree gated on its own URL leaf and carrying its own audience constant.
-The Global Decision Point id is reused, so the packaging root needs no
-parameterization — the two snapshots never coexist in a loaded package.
+record's single MCP branch) and emits
+AgentGatewayPortfolioMCP-x100-services.SNAPSHOT: the original `Portfolio
+MCP` set plus 99 clones, one per synthetic MCP (`portfolio-2` ..
+`portfolio-100`), each an identical 6-policy/16-rule subtree targeted at
+its own service (ServiceDefinition 'AgentGateway portfolio-<i>', matching
+what the parameterized sideband endpoint's 'service:AgentGateway {mcp}'
+derives per request) and carrying its own audience constant. No URL-leaf
+conditions on the clones: dispatch happens at the endpoint layer, Ping's
+documented model. The Global Decision Point id is reused, so the packaging
+root needs no parameterization.
 
 Deterministic by construction: every cloned id is uuid5 over a fixed
 namespace and the branch index, so regeneration is byte-identical. The
 baseline snapshot is never modified.
 
-Usage:
-  python3 scripts/generate-x100-snapshot.py             # condition-gated x100
-  python3 scripts/generate-x100-snapshot.py --services  # service-targeted x100
-
-Services mode emits the Ping-recommended dispatch shape instead: per branch
-a ServiceDefinition named AgentGateway.portfolio-<i> (matching what a
-parameterized sideband endpoint's service:AgentGateway.{mcp} derives), a
-Target element for it, and the Portfolio set clone targeted at that service
-with NO leaf condition. Dispatch then happens at the endpoint layer; the
-tree carries no URL conditions on the clones.
+Usage: python3 scripts/generate-x100-snapshot.py
 """
-import argparse
 import copy
 import json
 import sys
@@ -33,8 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP.SNAPSHOT"
-OUTPUT = ROOT / "server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP-x100.SNAPSHOT"
-OUTPUT_SERVICES = ROOT / "server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP-x100-services.SNAPSHOT"
+OUTPUT = ROOT / "server-profiles/pingauthorizepap/policies/AgentGatewayPortfolioMCP-x100-services.SNAPSHOT"
 
 BRANCH_COUNT = 100
 BRANCH_1_LEAF = "portfolio"
@@ -63,14 +56,6 @@ def services_namespace():
 def services_set_id(branch_index):
     """The services-mode clone's Portfolio-set id — exported for tests."""
     return clone_id(branch_index, PORTFOLIO_ID, services_namespace())
-
-
-def clone_key(element):
-    """The id-bearing sub-objects of one element that are cloned together
-    with it: children ids are rebuilt by re-walking the subtree; statements
-    and targets are themselves elements in the stream, so only the top-level
-    id and version need rewriting here."""
-    return element
 
 
 def reachable_subtree(elements, root_id):
@@ -108,24 +93,12 @@ def audience_attribute(branch_index, original_attr, namespace=UUID_NAMESPACE):
     return attr
 
 
-def set_leaf_condition(element, leaf):
-    """Rewrite the set condition's leaf comparison to the branch's leaf."""
-    for cond in element["condition"]["and"]["conditions"]:
-        cmp_ = cond.get("comparison")
-        if cmp_ and cmp_["left"]["attribute"]["id"] == LEAF_ATTR_ID:
-            cmp_["right"]["constant"]["value"] = leaf
-            return
-    raise ValueError(f"no leaf condition found on {element.get('name')}")
-
-
-def clone_subtree(elements, subtree_ids, branch_index, services=False,
-                  branch_service_id=None, branch_target_id=None,
-                  namespace=UUID_NAMESPACE):
+def clone_subtree(elements, subtree_ids, branch_index,
+                  branch_target_id=None, namespace=UUID_NAMESPACE):
     """Deep-copy the branch subtree with fresh deterministic ids and all
     audience references repointed to the branch's own audience attribute.
-    Condition mode (default): the set gets a per-branch leaf condition.
-    Services mode: the set gets NO condition and is targeted at the branch's
-    service via the branch's Target element."""
+    The set clone gets NO condition and is targeted at the branch's service
+    via the branch's Target element (Ping's documented dispatch model)."""
     id_map = {orig: clone_id(branch_index, orig, namespace) for orig in subtree_ids}
     cloned = []
     for element in elements:
@@ -154,13 +127,10 @@ def clone_subtree(elements, subtree_ids, branch_index, services=False,
             clone["name"] = f"{BRANCH_1_LEAF}-{branch_index} MCP"
             clone["description"] = clone["description"].replace(
                 audience_value(1), audience_value(branch_index))
-            if services:
-                # Ping-recommended dispatch: no URL condition; targeting is
-                # by the branch's service via the per-branch Target element.
-                clone["condition"] = {"empty": {}}
-                clone["targets"] = [branch_target_id]
-            else:
-                set_leaf_condition(clone, f"{BRANCH_1_LEAF}-{branch_index}")
+            # No URL condition: dispatch is by the branch's service via its
+            # Target element (Ping's documented model).
+            clone["condition"] = {"empty": {}}
+            clone["targets"] = [branch_target_id]
         cloned.append(clone)
     return cloned
 
@@ -207,15 +177,9 @@ def stream_digest(data):
     return base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--services", action="store_true",
-                        help="emit the service-targeted variant "
-                             "(AgentGatewayPortfolioMCP-x100-services.SNAPSHOT)")
-    args = parser.parse_args(argv)
-    output = OUTPUT_SERVICES if args.services else OUTPUT
-    generate(output, services=args.services)
-    print(f"Wrote {output} ({output.stat().st_size} bytes)")
+def main():
+    generate(OUTPUT)
+    print(f"Wrote {OUTPUT} ({OUTPUT.stat().st_size} bytes)")
 
 
 def branch_service_definition(branch_index, template):
@@ -275,7 +239,7 @@ def branch_1_target(service_id):
     }
 
 
-def generate(output_path, services=False):
+def generate(output_path):
     data = json.loads(BASELINE.read_text())
     by_id = {e["id"]: e for e in data if isinstance(e, dict) and e.get("id")}
     subtree_ids = reachable_subtree(data, PORTFOLIO_ID)
@@ -290,46 +254,39 @@ def generate(output_path, services=False):
                      if isinstance(e, dict) and e.get("id"))
     tail = data[last_index + 1:]
 
-    mode_ns = services_namespace() if services else UUID_NAMESPACE
+    mode_ns = services_namespace()
     out = list(data[: last_index + 1])
     for branch_index in range(2, BRANCH_COUNT + 1):
         out.append(audience_attribute(branch_index, audience_attr, mode_ns))
-        if services:
-            svc = branch_service_definition(branch_index, service_template)
-            target = branch_target(branch_index, svc["id"])
-            out.extend([svc, target])
-            out.extend(clone_subtree(
-                data, subtree_ids, branch_index, services=True,
-                branch_service_id=svc["id"], branch_target_id=target["id"],
-                namespace=mode_ns))
-        else:
-            out.extend(clone_subtree(data, subtree_ids, branch_index))
+        svc = branch_service_definition(branch_index, service_template)
+        target = branch_target(branch_index, svc["id"])
+        out.extend([svc, target])
+        out.extend(clone_subtree(
+            data, subtree_ids, branch_index,
+            branch_target_id=target["id"], namespace=mode_ns))
 
-    # The AgentGateway set sits in the head section; rewrite its children
-    # there (both modes keep all 100 sets under the one wrapper set) and
-    # append the tail. The wrapper keeps its baseline Target element, whose
-    # services list this function extends in services mode (below) to cover
-    # every derived service value.
+    # The wrapper's Target carries every service the parameterized endpoint
+    # can derive (plain AgentGateway + branch-1 + branches 2..100): a target
+    # naming only plain 'AgentGateway' proved NotApplicable live
+    # (2026-11-24) — the Target element is the multi-service join point.
+    # Branch 1's set gains its service target (its leaf condition stays:
+    # harmless under the parameterized endpoint, and it is what the
+    # campaign-of-record packaging serves if the plain shape is ever
+    # swapped back in live).
     for e in out:
-        if isinstance(e, dict) and e.get("id") == "57d54005-b9b3-4371-ba64-22996439ddf8" and services:
-            # Wrapper Target: plain AgentGateway + every branch service
-            # (branch 1's 'AgentGateway portfolio' included).
+        if isinstance(e, dict) and e.get("id") == "57d54005-b9b3-4371-ba64-22996439ddf8":
             e["targeted"]["services"] = [e["targeted"]["services"][0]] + [
-                clone_id(i, "48a0ae45-a0eb-40b4-90b1-a1ee77c17395", services_namespace())
+                clone_id(i, "48a0ae45-a0eb-40b4-90b1-a1ee77c17395", mode_ns)
                 for i in range(1, BRANCH_COUNT + 1)]
-        if isinstance(e, dict) and e.get("id") == PORTFOLIO_ID and services:
-            # Branch 1's set gains its service target; its leaf condition
-            # stays (harmless under the parameterized endpoint, decisive
-            # under the plain one).
-            e["targets"] = [clone_id(1, "target", services_namespace())]
+        if isinstance(e, dict) and e.get("id") == PORTFOLIO_ID:
+            e["targets"] = [clone_id(1, "target", mode_ns)]
     for e in out:
         if isinstance(e, dict) and e.get("id") == AGENTGATEWAY_ID:
             e["children"] = [{"id": PORTFOLIO_ID, "type": "PolicySet"}] + [
                 {"id": clone_id(i, PORTFOLIO_ID, mode_ns), "type": "PolicySet"}
                 for i in range(2, BRANCH_COUNT + 1)]
-    if services:
-        out.append(branch_1_service_definition(service_template))
-        out.append(branch_1_target(clone_id(1, service_template["id"], services_namespace())))
+    out.append(branch_1_service_definition(service_template))
+    out.append(branch_1_target(clone_id(1, service_template["id"], mode_ns)))
     out.extend(tail)
 
     # The footer carries a digest over the whole element stream; the clone

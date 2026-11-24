@@ -22,8 +22,7 @@ pingauthorize/            PAZ (the measured node, 2 replicas)
 pingauthorizepap/         PAP (package authoring only; idle during load runs)
 ├── policies/
 │   ├── AgentGatewayPortfolioMCP.SNAPSHOT   the full policy branch (a working MCP-gateway policy, see policies/README.md)
-│   ├── AgentGatewayPortfolioMCP-x100.SNAPSHOT  the 100-branch tree, condition-gated (scaling campaign variant)
-│   ├── AgentGatewayPortfolioMCP-x100-services.SNAPSHOT  the 100-branch tree, service-targeted, Ping's documented dispatch shape (generated)
+│   ├── AgentGatewayPortfolioMCP-x100-services.SNAPSHOT  the 100-branch tree, service-targeted — Ping's documented dispatch shape (generated)
 │   └── README.md
 └── hooks/81-install-policies.sh            imports + commits each staged snapshot into its own branch at boot
 ```
@@ -42,22 +41,17 @@ committed (`AgentGatewayPortfolioMCP` and `AgentGatewayPortfolioMCP-x100`).
 
 The x100 snapshot is generated, not hand-authored:
 `python3 scripts/generate-x100-snapshot.py` reads the baseline snapshot and
-emits `AgentGatewayPortfolioMCP-x100.SNAPSHOT` deterministically (uuid5 ids,
-recomputed stream digest), so regenerating is byte-identical and the
-baseline file is never modified. Both snapshots share the same Global
-Decision Point id (`a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d`) because the two
-trees never coexist in a loaded package — `build-package.sh` selects the
-tree with `POLICY_BRANCH=<branch name>`, and `swap-policy.sh` publishes a
-tree and probes both replicas before a run starts. The services variant is
-driven through a parameterized sideband endpoint
-(`base-path:/mcp/{mcp}`, `service:AgentGateway {mcp}`,
-`resource-path:{mcp}`). The endpoint shape is profile configuration:
-`40-sideband.dsconfig.subst` boots the parameterized endpoint statically
-(the deployment's resting state), and
-`scripts/set-sideband-endpoint.sh` applies the other shape live on both
-replicas when a swap targets a condition-gated tree — a live-only change
-does not survive a pod restart, and the next boot returns to the
-parameterized shape.
+emits `AgentGatewayPortfolioMCP-x100-services.SNAPSHOT` deterministically
+(uuid5 ids, recomputed stream digest), so regenerating is byte-identical
+and the baseline file is never modified. The x100 snapshot shares the
+baseline's Global Decision Point id (`a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d`)
+because the two trees never coexist in a loaded package —
+`build-package.sh` selects the tree with `POLICY_BRANCH=<branch name>`.
+The x100-services tree is the deployment's resting state and pairs with the
+parameterized sideband endpoint (`base-path:/mcp/{mcp}`,
+`service:AgentGateway {mcp}`, `resource-path:{mcp}`) that
+`40-sideband.dsconfig.subst` boots statically: a fresh deploy lands
+directly in it.
 
 ## Deploy order (scripts/deploy.sh drives this)
 

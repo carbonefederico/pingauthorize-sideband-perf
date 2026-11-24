@@ -135,14 +135,14 @@ real MCP-gateway deployment authorizes many MCP servers, so the Global
 Decision Point under load holds not one branch but roughly a hundred
 siblings, and every request must find its branch in that tree. The scaling
 campaign compares the baseline's single-branch tree against a 100-branch
-tree (`AgentGatewayPortfolioMCP-x100.SNAPSHOT`, generated from the baseline
-snapshot — 99 clones of the identical 6-policy/16-rule branch, each gated
-on its own URL leaf and minted-audience constant), measured at the
-1000 decisions/second reference level with the load generator drawing the
-branch for every request uniformly at random. The two trees are swapped by
-publishing packages (`scripts/swap-policy.sh`), and the baseline is
-re-measured adjacent in time to the scaling run (one run per configuration,
-in one session) so co-tenant drift cannot favor either tree.
+tree (`AgentGatewayPortfolioMCP-x100-services.SNAPSHOT`, generated from the
+baseline snapshot — 99 clones of the identical 6-policy/16-rule branch,
+each targeted at its own service and minted-audience constant), measured at
+the 1000 decisions/second reference level with the load generator drawing
+the branch for every request uniformly at random. The baseline was
+re-measured adjacent in time to the scaling run (one run per
+configuration, in one session) so co-tenant drift cannot favor either
+tree.
 
 Two earlier service-dispatch runs are discarded rather than reported:
 20261124142408 (its PAZ replicas had not converged on the same endpoint
@@ -151,8 +151,8 @@ measured the wrong configuration) and 20261124143629 (a 40-second debug
 run against the same unconverged state). The discarded-run report and the
 verification run's report are kept in `reports/` for provenance; the
 reported service-dispatch run is 20261124144442 (100% expected outcomes).
-The convergence failure is the reason `set-sideband-endpoint.sh` now
-applies and verifies the endpoint on both replicas before any run.
+The endpoint now boots statically from the profile in its single shape,
+which removes that convergence failure class entirely.
 
 The comparison supports no conclusions about policy-content diversity:
 all 100 branches share the identical structure, which keeps per-branch
@@ -165,28 +165,22 @@ the resolver census is the baseline's. As everywhere in this project, the
 benchmark applies no performance acceptance criteria: the per-branch
 latency spread and the tree-size comparison are reported as measurements.
 
-A third configuration measures the dispatch shape Ping's documentation
-recommends: a parameterized sideband endpoint
-(`base-path:/mcp/{mcp}`, `service:AgentGateway portfolio-{mcp}`) whose
-per-request derived service value targets each MCP's own policy set
+The service-dispatch configuration measures the dispatch shape Ping's
+documentation recommends, and is the deployment's settled state: a
+parameterized sideband endpoint
+(`base-path:/mcp/{mcp}`, `service:AgentGateway {mcp}`, `resource-path:{mcp}`)
+whose per-request derived service value targets each MCP's own policy set
 (`AgentGatewayPortfolioMCP-x100-services.SNAPSHOT`: 103 ServiceDefinitions
-(the 3 baseline ones plus 100 per-MCP) and service-targeted set clones, no URL-leaf conditions on the clones).
-The condition-gated x100 tree and the baseline are measured through the
-plain endpoint (`base-path:/mcp`, `service:AgentGateway`); every
-`swap-policy.sh` target moves the endpoint and the tree together, because
-each tree expects exactly one endpoint shape. The doc background is
+— the 3 baseline ones plus 100 per-MCP — and service-targeted set clones,
+no URL-leaf conditions on the clones). The doc background is
 PingAuthorize's sideband endpoint and path-parameter configuration (the
 endpoint's base-path routes requests and its service value targets
 policies) and the combining-algorithms page, which names `FirstApplicable`'s
-sequential sibling scan — the cost the condition-gated variant pays and
-the service-targeted variant avoids. After the campaign the deployment
-rests on the recommended shape: the parameterized endpoint with the
-x100-services tree published and probed. The endpoint shape is part of the
-deployed profile — `40-sideband.dsconfig.subst` boots the parameterized
-endpoint statically — so a fresh deploy lands directly in the resting
-state; a swap to the baseline tree flips the endpoint live
-(`set-sideband-endpoint.sh` inside `swap-policy.sh`) and the next boot
-returns to the parameterized shape.
+sequential sibling scan — the cost this shape avoids, as the measurements
+show (the condition-gated variant's branch-position gradient 2.53→3.65 ms
+flattens to 2.55→2.68 ms). The endpoint boots statically from the profile
+(`40-sideband.dsconfig.subst`), so a fresh deploy lands directly in this
+state; the profile and the live cluster cannot disagree about the shape.
 
 ## Test environment and sizing
 
