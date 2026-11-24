@@ -179,8 +179,8 @@ policies) and the combining-algorithms page, which names `FirstApplicable`'s
 sequential sibling scan — the cost this shape avoids, as the measurements
 show (the condition-gated variant's branch-position gradient 2.53→3.65 ms
 flattens to 2.55→2.68 ms). The endpoint boots statically from the profile
-(`40-sideband.dsconfig.subst`), so a fresh deploy lands directly in this
-state; the profile and the live cluster cannot disagree about the shape.
+(`40-sideband.dsconfig.subst`) and `deploy.sh` publishes this tree by
+default, so a fresh deploy lands directly in this state, ready to run.
 
 ## Test environment and sizing
 

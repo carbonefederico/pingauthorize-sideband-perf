@@ -130,7 +130,12 @@ PY
 
 
     # --- 3. publish the policy package through PAP (writes package + pointer) ---
-    build_output="$("${ROOT_DIR}/scripts/build-package.sh")"
+    # The deployment's target state is the x100-services tree (the profile's
+    # parameterized endpoint pairs with it): a fresh deploy lands ready to run.
+    # POLICY_BRANCH=AgentGatewayPortfolioMCP deploys the campaign-of-record
+    # baseline instead — it needs the plain endpoint shape too (see the
+    # swap-policy history in git for that tooling).
+    build_output="$(POLICY_BRANCH="${POLICY_BRANCH:-AgentGatewayPortfolioMCP-x100-services}" "${ROOT_DIR}/scripts/build-package.sh")"
     package_id="$(echo "${build_output}" | sed -n 's/^PACKAGE_ID=//p')"
     [[ -n "${package_id}" ]] || {
       echo "ERROR: build-package.sh did not report a PACKAGE_ID; cannot confirm the load." >&2

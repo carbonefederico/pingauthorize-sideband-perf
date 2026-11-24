@@ -46,7 +46,8 @@ emits `AgentGatewayPortfolioMCP-x100-services.SNAPSHOT` deterministically
 and the baseline file is never modified. The x100 snapshot shares the
 baseline's Global Decision Point id (`a7c4e2d0-8f11-4b5a-9c3d-6e8f2a1b4c7d`)
 because the two trees never coexist in a loaded package —
-`build-package.sh` selects the tree with `POLICY_BRANCH=<branch name>`.
+`build-package.sh` selects the tree with `POLICY_BRANCH=<branch name>`,
+defaulting to the x100-services branch in `deploy.sh`.
 The x100-services tree is the deployment's resting state and pairs with the
 parameterized sideband endpoint (`base-path:/mcp/{mcp}`,
 `service:AgentGateway {mcp}`, `resource-path:{mcp}`) that
