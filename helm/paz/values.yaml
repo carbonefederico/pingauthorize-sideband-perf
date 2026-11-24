@@ -104,7 +104,10 @@ ping-devops:
     envs:
       SERVER_PROFILE_URL: ''
       SERVER_PROFILE_PATH: server-profiles/pingauthorizepap
-      PING_EXTERNAL_BASE_URL: pingauthorize-sideband-perf-pap-pingauthorizepap.ping-devops.com:443
+      # Must match the ingress host exactly: the PAP UI calls its own API at
+      # this hostname, and a stale name makes every console page fail with
+      # "Unknown error ... /api/version-control/branches" (CORS/DNS).
+      PING_EXTERNAL_BASE_URL: authorize-performance-test-pingauthorizepap.ping-devops.com:443
     workload:
       type: StatefulSet
       statefulSet:
