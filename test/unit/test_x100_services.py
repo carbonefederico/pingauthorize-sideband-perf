@@ -39,7 +39,11 @@ class X100ServicesTests(unittest.TestCase):
             p.name: hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (BASELINE, COND_X100) if p.exists()
         }
-        gen.main(argv=["--services"])
+        # Regenerate only when absent (matching the condition-mode suite):
+        # the committed snapshot is the regression artifact — the tests must
+        # verify it, not rewrite it (review finding 3, 2026-11-24).
+        if not SERVICES_X100.exists():
+            gen.main(argv=["--services"])
         cls.x = json.loads(SERVICES_X100.read_text())
         cls.ids = by_id(cls.x)
 
@@ -65,6 +69,12 @@ class X100ServicesTests(unittest.TestCase):
         footers = [e for e in self.x if isinstance(e, dict) and e.get("@class") == "DataStreamFooter"]
         self.assertEqual(len(footers), 1)
         self.assertIs(self.x[-1], footers[0])
+
+    def test_digest_recomputed(self):
+        # The footer digest PAP validates must equal the recomputed stream
+        # digest of the committed snapshot (review finding 4: pin offline;
+        # a stale footer fails live PAP import only).
+        self.assertEqual(self.x[-1]["digest"], gen.stream_digest(self.x))
 
     def test_wrapper_keeps_all_branches(self):
         # Both modes keep all 100 sets under the one AgentGateway wrapper;

@@ -18,8 +18,6 @@
 # template double-prints it ('AgentGateway portfolio-portfolio-2', live
 # finding 2026-11-24). No periods: PAP rejects periods in names.
 #
-# Idempotent: no-ops when the named endpoint already carries the requested
-# shape. Runs dsconfig inside pod ${PAZ_RELEASE}-pingauthorize-0.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
@@ -49,7 +47,7 @@ for pod_idx in 0 1; do
     --endpoint-name "${ENDPOINT_NAME}" \
     --set "base-path:${BASE_PATH}" \
     --set "service:${SERVICE}" \
-    "${RESOURCE_PATH_ARGS[@]}" \
+    ${RESOURCE_PATH_ARGS[@]+"${RESOURCE_PATH_ARGS[@]}"} \
     --set access-token-validator:PerfSubjectJWT 2>&1 | tail -1
   "${DSCONFIG[@]}" list-sideband-api-endpoints 2>/dev/null | grep -F "${BASE_PATH}" | grep -F "${SERVICE}" \
     || { echo "ERROR: endpoint does not reflect the requested shape on replica ${pod_idx}" >&2; exit 1; }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # swap-policy.sh — publish a policy tree to PAZ and verify it is live.
 #
-# Usage: ./scripts/swap-policy.sh baseline|x100
+# Usage: ./scripts/swap-policy.sh baseline|x100|x100-services
 #
 # The one-command tree swap between runs: builds the deployment package from
 # the named PAP branch (POLICY_BRANCH), publishes it to the S3 package store,
@@ -90,19 +90,29 @@ probe() { # probe <mcp-aud> -> prints the probe's JSON line
     node "${ROOT_DIR}/scripts/probe-branch.mjs"
 }
 
+# Tree-identity assertion per tree: on the baseline tree /mcp/portfolio-2
+# is NOT applicable (PAZ serializes N/A as an embedded 4xx deny — the probe
+# must NOT permit); on both x100 trees the branch-2 set exists and the
+# request must permit. Per-tree, not permit-then-negate: a baseline swap
+# correctly returns deny and must PASS here (review finding 2, 2026-11-24).
 branch2="${MCP_AUD}-2"   # e.g. .../mcp/portfolio -> .../mcp/portfolio-2
 probe_line="$(probe "${branch2}")"
 echo "Probe ${branch2}: ${probe_line}"
-if [[ "${probe_line}" != *'"verdict":"permit"'* ]]; then
-  echo "ERROR: tree-identity probe failed — ${branch2} is not a permit."
-  echo "Loaded tree is NOT ${TREE} (or the probe itself failed: ${probe_line})."
-  exit 1
-fi
-
-if [[ "${TREE}" == "baseline" ]]; then
-  echo "ERROR: the negative probe unexpectedly permitted on the baseline tree — ${probe_line}"
-  exit 1
-fi
+case "${TREE}" in
+  baseline)
+    if [[ "${probe_line}" == *'"verdict":"permit"'* ]]; then
+      echo "ERROR: ${branch2} permitted on the baseline tree — the loaded tree is NOT baseline (or a stale x100 package is still live)."
+      exit 1
+    fi
+    ;;
+  *)
+    if [[ "${probe_line}" != *'"verdict":"permit"'* ]]; then
+      echo "ERROR: tree-identity probe failed — ${branch2} is not a permit."
+      echo "Loaded tree is NOT ${TREE} (or the probe itself failed: ${probe_line})."
+      exit 1
+    fi
+    ;;
+esac
 
 trap - EXIT
 kill "${pf_pid}" 2>/dev/null || true

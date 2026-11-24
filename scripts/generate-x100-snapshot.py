@@ -307,13 +307,9 @@ def generate(output_path, services=False):
 
     # The AgentGateway set sits in the head section; rewrite its children
     # there (both modes keep all 100 sets under the one wrapper set) and
-    # append the tail. In services mode the wrapper loses its service Target:
-    # the parameterized endpoint derives 'AgentGateway portfolio-<i>' per
-    # request, which does not match the wrapper's plain 'AgentGateway' target
-    # — a targeted wrapper would be NotApplicable before its children ever
-    # evaluate (live finding, 2026-11-24). The wrapper becomes an
-    # always-applicable container; the branch sets' own service targets do
-    # the selection Ping's docs prescribe.
+    # append the tail. The wrapper keeps its baseline Target element, whose
+    # services list this function extends in services mode (below) to cover
+    # every derived service value.
     for e in out:
         if isinstance(e, dict) and e.get("id") == "57d54005-b9b3-4371-ba64-22996439ddf8" and services:
             # Wrapper Target: plain AgentGateway + every branch service
@@ -331,14 +327,6 @@ def generate(output_path, services=False):
             e["children"] = [{"id": PORTFOLIO_ID, "type": "PolicySet"}] + [
                 {"id": clone_id(i, PORTFOLIO_ID, mode_ns), "type": "PolicySet"}
                 for i in range(2, BRANCH_COUNT + 1)]
-            if services:
-                # The wrapper's Target must match every derived service value:
-                # a Target's services list carries all 100 branch services
-                # (plus plain AgentGateway for the condition-gated branch 1).
-                # Exact-match on a single name proved NotApplicable live
-                # (2026-11-24); the Target element is the multi-service join
-                # point Ping's 'target first on service' model implies.
-                e["targets"] = ["57d54005-b9b3-4371-ba64-22996439ddf8"]
     if services:
         out.append(branch_1_service_definition(service_template))
         out.append(branch_1_target(clone_id(1, service_template["id"], services_namespace())))

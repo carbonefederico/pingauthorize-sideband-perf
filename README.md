@@ -141,16 +141,18 @@ on its own URL leaf and minted-audience constant), measured at the
 1000 decisions/second reference level with the load generator drawing the
 branch for every request uniformly at random. The two trees are swapped by
 publishing packages (`scripts/swap-policy.sh`), and the baseline is
-re-measured interleaved with the scaling runs (three runs each,
-B/S/B/S/B/S in one session) so co-tenant drift cannot favor either tree.
+re-measured adjacent in time to the scaling run (one run per configuration,
+in one session) so co-tenant drift cannot favor either tree.
 
-One earlier service-dispatch run (2026-11-24 14:24) is discarded rather
-than reported: its PAZ replicas had not converged on the same endpoint
-shape (one replica still served the plain endpoint), so half its decisions
-measured the wrong configuration — a collection-integrity observation, and
-the reason `set-sideband-endpoint.sh` now applies and verifies the endpoint
-on both replicas before any run. The reported service-dispatch run is
-20261124144442 (100% expected outcomes).
+Two earlier service-dispatch runs are discarded rather than reported:
+20261124142408 (its PAZ replicas had not converged on the same endpoint
+shape — one replica still served the plain endpoint, so half its decisions
+measured the wrong configuration) and 20261124143629 (a 40-second debug
+run against the same unconverged state). The discarded-run report and the
+verification run's report are kept in `reports/` for provenance; the
+reported service-dispatch run is 20261124144442 (100% expected outcomes).
+The convergence failure is the reason `set-sideband-endpoint.sh` now
+applies and verifies the endpoint on both replicas before any run.
 
 The comparison supports no conclusions about policy-content diversity:
 all 100 branches share the identical structure, which keeps per-branch
@@ -167,8 +169,8 @@ A third configuration measures the dispatch shape Ping's documentation
 recommends: a parameterized sideband endpoint
 (`base-path:/mcp/{mcp}`, `service:AgentGateway portfolio-{mcp}`) whose
 per-request derived service value targets each MCP's own policy set
-(`AgentGatewayPortfolioMCP-x100-services.SNAPSHOT`: 100 ServiceDefinitions
-and service-targeted set clones, no URL-leaf conditions on the clones).
+(`AgentGatewayPortfolioMCP-x100-services.SNAPSHOT`: 103 ServiceDefinitions
+(the 3 baseline ones plus 100 per-MCP) and service-targeted set clones, no URL-leaf conditions on the clones).
 The condition-gated x100 tree and the baseline are measured through the
 plain endpoint (`base-path:/mcp`, `service:AgentGateway`); every
 `swap-policy.sh` target moves the endpoint and the tree together, because
