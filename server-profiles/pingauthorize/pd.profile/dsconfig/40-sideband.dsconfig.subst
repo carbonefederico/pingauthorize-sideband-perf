@@ -14,8 +14,10 @@
 # MUST carry {mcp}: base-path otherwise consumes the whole URI,
 # HttpRequest.ResourcePath resolves empty, and condition evaluation over it
 # errors INDETERMINATE (fail-closed 403). The plain shape of the campaign
-# of record (base-path:/mcp, service:AgentGateway) is reachable between runs
-# via scripts/swap-policy.sh baseline.
+# of record (base-path:/mcp, service:AgentGateway) is not served by any
+# current tooling; the baseline tree is published under this parameterized
+# endpoint only with a matching plain-endpoint change, applied by hand if
+# ever needed (see the swap-policy history in git for the former tooling).
 
 # Order matters: the shared secret must exist before the Sideband API
 # extension references it.

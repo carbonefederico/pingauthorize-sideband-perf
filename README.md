@@ -313,8 +313,8 @@ server-profiles/     The PAZ dsconfig layer (JWKS token validator,
 profiles/            Load profiles: stage-500/1000/1500/2000.env (the campaign
                      ladder) and agents.env. Each fully describes its run.
 scripts/             One script per step: setup-aws (one-time S3 entities),
-                     create-secrets, deploy (phases: headroom/prep/package/
-                     runtime), verify, build-package, smoke, run-in-cluster,
+                     create-secrets, deploy (headroom summary, or the full
+                     deploy), verify, build-package, smoke, run-in-cluster,
                      monitor, scrape-monitor, generate-report.py,
                      analyze-run.py, analyze-timeline.py, validate,
                      uninstall.

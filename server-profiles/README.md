@@ -37,7 +37,8 @@ only COMMITTED snapshots — the hook commits after import, and PAZ's policy
 data comes from the deployment package published on top of that commit.
 The hook is snapshot-generic: it loops over every staged `*.SNAPSHOT` file,
 so the two snapshots import as two sibling PAP branches that coexist
-committed (`AgentGatewayPortfolioMCP` and `AgentGatewayPortfolioMCP-x100`).
+committed (`AgentGatewayPortfolioMCP` and
+`AgentGatewayPortfolioMCP-x100-services`).
 
 The x100 snapshot is generated, not hand-authored:
 `python3 scripts/generate-x100-snapshot.py` reads the baseline snapshot and
@@ -64,7 +65,8 @@ directly in it.
    TLS secrets and the `paz-secrets`/`paz-s3`/`paz-loadtest` Secrets.
 2. One Helm release installs BOTH products together
    (`helm/paz/values.yaml` drives the upstream chart): PAP (whose boot hook
-   imports and commits `AgentGatewayPortfolioMCP`) and the two PAZ replicas
+   imports and commits both `AgentGatewayPortfolioMCP` and
+   `AgentGatewayPortfolioMCP-x100-services`) and the two PAZ replicas
    (which boot in embedded-PDP mode and register the S3 package store).
    deploy.sh waits for both to become Ready and runs `verify.sh`.
 3. `./scripts/build-package.sh` publishes the policy package entirely
