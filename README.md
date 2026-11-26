@@ -20,23 +20,38 @@ the package once and sits off the decision path entirely.
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph k8s["Kubernetes cluster (project namespace, NAMESPACE in .env)"]
-        subgraph "measured path"
-        k6["k6 agents ×10<br/>(plays the gateway / PEP)"]
-        svc["PAZ Service<br/>cluster-internal HTTPS"]
-        paz["PAZ ×2 StatefulSet<br/>embedded PDP"]
-        end
-        jwks["JWKS server ×1<br/>(publishes the subject key's JWKs<br/>for kid perf-subject-key)"]
-        pap["PAP ×1<br/>authoring + inspection (public via ingress)"]
-    end
-    s3["S3 bucket<br/>(versioned package store)"]
+%%{init: {'flowchart': {'curve': 'linear'}}}%%
+flowchart TB
+    subgraph CL["Kubernetes cluster — 6 nodes, r5.xlarge (project namespace)"]
+        direction TB
 
-    k6 -- "POST /sideband/request<br/>PDG-TOKEN + Bearer<br/>(fresh self-signed RS256 per iteration)" --> svc
-    svc --> paz
-    paz -. "JWKS fetch on validation<br/>(cached by PAZ)" .-> jwks
-    pap -. "build-package.sh via PAP API<br/>→ PAP publishes package + pointer to s3://" .-> s3
-    s3 -. "PAZ polls (30s)<br/>no restart on policy change" .-> paz
+        subgraph LB["Load generation — k6 agents play the gateway (PEP)"]
+            K1["k6 agent-0"]
+            K2["k6 agent-1"]
+            KM["…"]
+            K9["k6 agent-9"]
+            JB["Kubernetes Job<br/>10 indexed completions"]
+        end
+
+        subgraph PAZ["PingAuthorize — 2 StatefulSet Pods, embedded PDP"]
+            P1["paz-0<br/>2 CPU req / 4 CPU lim"]
+            P2["paz-1<br/>2 CPU req / 4 CPU lim"]
+            SVC["Kubernetes Service<br/>cluster-internal HTTPS"]
+        end
+
+        JWKS["jwks Pod<br/>nginx, serves subject-key JWKS<br/>(kid perf-subject-key)"]
+        PAP["PAP Pod<br/>policy authoring + inspection (public via ingress),<br/>idle during runs"]
+    end
+
+    S3["S3 bucket<br/>versioned package store"]
+
+    JB --> K1 & K2 & KM & K9
+    K1 & K2 & KM & K9 -->|"sideband decision<br/>POST /sideband/request<br/>PDG-TOKEN + Bearer"| SVC
+    SVC --> P1 & P2
+    P1 -.->|"JWKS fetch (cached)"| JWKS
+    P2 -.->|"JWKS fetch (cached)"| JWKS
+    PAP -.->|"publish package"| S3
+    P1 & P2 -.->|"Download package - every 30s"| S3
 ```
 
 What is deliberately absent: no API gateway, no adapter, and
