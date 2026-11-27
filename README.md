@@ -303,8 +303,9 @@ helm/paz/            One configuration chart for the whole Ping stack: values fo
                      one release carrying PAP (public ingress, inspection surface)
                      and 2 PAZ replicas (cluster-internal, ephemeral /opt/out,
                      lab sizing requests 2 CPU/3Gi, limits 4/6Gi).
-helm/loadtest/       The k6 agent chart: an indexed Job, N parallel agent pods,
-                     each running files/sideband-decision.js with files/envelope.mjs.
+helm/loadtest/       The k6 agent chart (grafana/k6:2.2.0): an indexed Job, N
+                     parallel agent pods, each running files/sideband-decision.js
+                     with files/envelope.mjs.
 server-profiles/     The PAZ dsconfig layer (JWKS token validator,
                      embedded-PDP Policy Decision Service, sideband endpoint)
                      and the PAP profile (snapshot import hook). See
